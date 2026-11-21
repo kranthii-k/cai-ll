@@ -1,0 +1,1273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Camply Backend — System Architecture</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ink:#10121B;
+    --panel:#171A26;
+    --panel-raised:#1E2233;
+    --hair:#2B2F42;
+    --text:#E7E4DA;
+    --muted:#9497AC;
+    --amber:#E3A65C;
+    --amber-dim:#7A5C34;
+    --teal:#5FBFB6;
+    --teal-dim:#2E4E4B;
+    --rose:#D97785;
+    --radius:5px;
+    --sans:'Inter',system-ui,-apple-system,sans-serif;
+    --display:'Space Grotesk',var(--sans);
+    --mono:'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  *{box-sizing:border-box;}
+  html{scroll-behavior:smooth;}
+  @media (prefers-reduced-motion: reduce){ html{scroll-behavior:auto;} }
+  body{
+    margin:0;
+    background:var(--ink);
+    color:var(--text);
+    font-family:var(--sans);
+    font-size:15.5px;
+    line-height:1.6;
+    -webkit-font-smoothing:antialiased;
+  }
+  ::selection{background:var(--amber-dim);color:#fff;}
+
+  a{color:var(--teal);}
+
+  /* ---------- layout shell ---------- */
+  .shell{
+    display:grid;
+    grid-template-columns:220px 1fr;
+    min-height:100vh;
+  }
+  header.topbar{
+    grid-column:1 / -1;
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    padding:14px 28px;
+    border-bottom:1px solid var(--hair);
+    position:sticky;top:0;
+    background:rgba(16,18,27,0.92);
+    backdrop-filter:blur(6px);
+    z-index:40;
+  }
+  .brand{
+    display:flex;align-items:baseline;gap:10px;
+  }
+  .brand .mark{
+    width:10px;height:10px;background:var(--amber);
+    display:inline-block;border-radius:2px;
+  }
+  .brand b{
+    font-family:var(--display);font-weight:600;font-size:16.5px;letter-spacing:0.2px;
+  }
+  .brand span{color:var(--muted);font-size:12.5px;}
+  .topbar-right{font-family:var(--mono);font-size:11.5px;color:var(--muted);}
+
+  nav.rail{
+    border-right:1px solid var(--hair);
+    padding:22px 0;
+    position:sticky;
+    top:53px;
+    height:calc(100vh - 53px);
+    overflow-y:auto;
+  }
+  nav.rail a{
+    display:flex;align-items:center;gap:10px;
+    padding:9px 22px;
+    color:var(--muted);
+    text-decoration:none;
+    font-size:13.5px;
+    border-left:2px solid transparent;
+    transition:color .15s, border-color .15s, background .15s;
+  }
+  nav.rail a .dot{
+    width:6px;height:6px;border-radius:50%;
+    background:var(--hair);
+    flex:none;
+    transition:background .15s;
+  }
+  nav.rail a:hover{color:var(--text);background:rgba(255,255,255,0.02);}
+  nav.rail a.active{color:var(--text);border-left-color:var(--amber);background:rgba(227,166,92,0.06);}
+  nav.rail a.active .dot{background:var(--amber);}
+
+  main{
+    padding:0 0 100px 0;
+    min-width:0;
+  }
+  section{
+    padding:56px 44px;
+    max-width:920px;
+    border-bottom:1px solid var(--hair);
+    scroll-margin-top: 130px;
+  }
+  section:last-of-type{border-bottom:none;}
+
+  .eyebrow{
+    color:var(--teal);
+    font-size:12.5px;
+    font-family:var(--mono);
+    margin:0 0 10px 0;
+  }
+  h1{
+    font-family:var(--display);
+    font-size:34px;
+    line-height:1.15;
+    margin:0 0 14px 0;
+    font-weight:600;
+    max-width:14ch;
+  }
+  h2{
+    font-family:var(--display);
+    font-size:23px;
+    font-weight:600;
+    margin:0 0 6px 0;
+    padding-left:14px;
+    border-left:3px solid var(--amber);
+  }
+  h3{
+    font-family:var(--display);
+    font-size:16px;
+    font-weight:600;
+    margin:0 0 8px 0;
+  }
+  .lede{
+    color:var(--muted);
+    font-size:16px;
+    max-width:62ch;
+    margin:0 0 26px 0;
+  }
+  .section-intro{
+    color:var(--muted);
+    max-width:66ch;
+    margin:0 0 28px 0;
+    padding-left:17px;
+  }
+  p{max-width:68ch;}
+
+  /* ---------- ref chips ---------- */
+  .ref{
+    font-family:var(--mono);
+    font-size:11.5px;
+    color:var(--teal);
+    background:var(--teal-dim);
+    border:1px solid rgba(95,191,182,0.35);
+    padding:2px 7px;
+    border-radius:3px;
+    cursor:pointer;
+    white-space:normal;
+    word-break:break-all;
+    text-align:left;
+    line-height:1.7;
+    display:inline-block;
+  }
+  .ref:hover, .ref:focus-visible{background:rgba(95,191,182,0.28);outline:none;}
+  #tooltip{
+    position:fixed;
+    max-width:280px;
+    background:var(--panel-raised);
+    border:1px solid var(--hair);
+    color:var(--text);
+    font-size:12.5px;
+    padding:10px 12px;
+    border-radius:var(--radius);
+    box-shadow:0 8px 24px rgba(0,0,0,0.45);
+    z-index:200;
+    display:none;
+    line-height:1.5;
+  }
+  #tooltip .t-file{display:block;font-family:var(--mono);color:var(--amber);font-size:11px;margin-bottom:4px;}
+
+  /* ---------- stack pills (overview) ---------- */
+  .stack-row{display:flex;flex-wrap:wrap;gap:8px;margin:20px 0 0 0;}
+  .pill{
+    border:1px solid var(--hair);
+    background:var(--panel);
+    padding:6px 12px;
+    border-radius:20px;
+    font-size:12.5px;
+    color:var(--text);
+  }
+
+  /* ---------- diagram ---------- */
+  .diagram-card{
+    border:1px solid var(--hair);
+    background:var(--panel);
+    border-radius:var(--radius);
+    padding:18px 18px 10px 18px;
+    margin-top:22px;
+  }
+  .diagram-card .diagram-head{
+    display:flex;align-items:center;justify-content:space-between;
+    margin-bottom:6px;flex-wrap:wrap;gap:10px;
+  }
+  .diagram-card .diagram-head p{margin:0;color:var(--muted);font-size:12.5px;}
+  .btn{
+    font-family:var(--sans);
+    font-size:12.5px;
+    font-weight:600;
+    color:var(--ink);
+    background:var(--amber);
+    border:none;
+    padding:8px 14px;
+    border-radius:4px;
+    cursor:pointer;
+  }
+  .btn:hover{background:#eab475;}
+  .btn.ghost{
+    background:transparent;color:var(--text);border:1px solid var(--hair);
+  }
+  .btn.ghost:hover{border-color:var(--muted);}
+  .diagram-wrap{overflow-x:auto;padding-bottom:8px;}
+  .diagram-wrap svg{display:block;width:100%;min-width:880px;height:auto;}
+
+  .node rect{
+    fill:var(--panel-raised);
+    stroke:var(--hair);
+    stroke-width:1.4;
+    transition:stroke .2s, fill .2s;
+  }
+  .node text{fill:var(--text);font-family:var(--sans);}
+  .node .sub{fill:var(--muted);font-size:10.5px;}
+  .node .title{font-size:12.5px;font-weight:600;}
+  .node{cursor:pointer;}
+  .node:hover rect{stroke:var(--muted);}
+  .node.active rect{stroke:var(--amber);fill:#2a2314;stroke-width:2;}
+  .node.active .sub{fill:var(--amber);}
+  .edge{stroke:var(--hair);stroke-width:1.4;fill:none;}
+  .edge.dashed{stroke-dasharray:4 4;}
+  .edge.response{stroke:var(--teal-dim);stroke-dasharray:3 5;}
+  .edge.active{stroke:var(--amber);stroke-width:2.2;}
+  .edge.response.active{stroke:var(--teal);}
+  .arc-label{fill:var(--muted);font-size:10px;font-family:var(--mono);}
+
+  .diagram-panel{
+    margin-top:14px;
+    border-top:1px dashed var(--hair);
+    padding-top:14px;
+    font-size:13px;
+    color:var(--muted);
+    min-height:22px;
+  }
+  .diagram-panel b{color:var(--text);font-family:var(--display);}
+  .diagram-panel .refs{margin-top:6px;display:flex;gap:6px;flex-wrap:wrap;}
+
+  /* ---------- stepper ---------- */
+  .steps{list-style:none;margin:0;padding:0;border-left:1px solid var(--hair);margin-left:6px;}
+  .steps li{
+    position:relative;
+    padding:0 0 26px 26px;
+  }
+  .steps li:last-child{padding-bottom:0;}
+  .steps li::before{
+    content:"";
+    position:absolute;left:-5.5px;top:3px;
+    width:10px;height:10px;border-radius:50%;
+    background:var(--ink);border:2px solid var(--amber);
+  }
+  .steps li .step-title{font-weight:600;margin-bottom:3px;font-family:var(--display);font-size:14.5px;}
+  .steps li .step-desc{color:var(--muted);font-size:13.5px;margin-bottom:6px;}
+
+  /* ---------- module grid ---------- */
+  .search{
+    width:100%;max-width:340px;
+    background:var(--panel);
+    border:1px solid var(--hair);
+    color:var(--text);
+    padding:9px 12px;
+    border-radius:4px;
+    font-family:var(--sans);
+    font-size:13.5px;
+    margin-bottom:20px;
+  }
+  .search:focus{outline:1px solid var(--amber);}
+  .module-grid{
+    display:grid;
+    grid-template-columns:repeat(auto-fill,minmax(280px,1fr));
+    gap:10px;
+  }
+  .module-card{
+    border:1px solid var(--hair);
+    background:var(--panel);
+    padding:14px 16px;
+    border-radius:var(--radius);
+  }
+  .module-card .path{
+    font-family:var(--mono);color:var(--amber);font-size:12px;margin-bottom:6px;display:block;
+  }
+  .module-card p{margin:0;color:var(--muted);font-size:13px;max-width:none;}
+  .module-card.hide{display:none;}
+  .module-card.has-endpoints{grid-column:span 1;}
+  .ep-table{width:100%;border-collapse:collapse;margin-top:10px;font-size:11.5px;}
+  .ep-table td{padding:4px 0;border-top:1px solid var(--hair);vertical-align:top;}
+  .ep-table tr:first-child td{border-top:1px solid var(--hair);}
+  .ep-method{font-family:var(--mono);width:52px;font-weight:600;}
+  .ep-get{color:var(--teal);} .ep-post{color:var(--amber);} .ep-patch{color:#c9a6e6;} .ep-delete{color:var(--rose);}
+  .ep-path{font-family:var(--mono);color:var(--text);width:auto;padding-right:8px;}
+  .ep-auth{width:20px;text-align:center;}
+  .ep-d{color:var(--muted);}
+  .module-legend{color:var(--muted);font-size:12px;margin:-8px 0 18px 0;}
+
+  /* ---------- accordion ---------- */
+  .acc-item{border:1px solid var(--hair);border-radius:var(--radius);margin-bottom:8px;background:var(--panel);overflow:hidden;}
+  .acc-head{
+    display:flex;align-items:center;justify-content:space-between;
+    padding:13px 16px;cursor:pointer;
+    font-family:var(--display);font-weight:600;font-size:14.5px;
+  }
+  .acc-head .chev{color:var(--muted);transition:transform .18s;font-family:var(--mono);}
+  .acc-item.open .chev{transform:rotate(45deg);}
+  .acc-body{
+    max-height:0;overflow:hidden;transition:max-height .22s ease;
+    padding:0 16px;color:var(--muted);font-size:13.5px;
+  }
+  .acc-item.open .acc-body{padding:0 16px 16px 16px;}
+  .acc-body .refs{margin-top:8px;display:flex;gap:6px;flex-wrap:wrap;}
+  .bug-label{color:var(--amber);font-family:var(--display);font-size:12.5px;}
+  .fix-line code{
+    display:inline-block;margin-top:4px;font-family:var(--mono);font-size:12px;
+    color:var(--teal);background:var(--panel-raised);border:1px solid var(--hair);
+    padding:6px 9px;border-radius:4px;line-height:1.6;
+    white-space:normal;
+    word-break:break-all;
+  }
+  .bust-table{width:100%;border-collapse:collapse;margin:10px 0;font-size:12.5px;}
+  .bust-table th{text-align:left;color:var(--muted);font-weight:600;padding:5px 8px 5px 0;border-bottom:1px solid var(--hair);}
+  .bust-table td{padding:5px 8px 5px 0;border-bottom:1px solid var(--hair);color:var(--text);}
+
+  /* ---------- data model clusters ---------- */
+  .cluster-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px;}
+  .cluster{border:1px solid var(--hair);background:var(--panel);border-radius:var(--radius);padding:16px;}
+  .cluster h3{color:var(--text);}
+  .cluster .tag{font-family:var(--mono);font-size:11px;color:var(--muted);margin-bottom:10px;display:block;}
+  .model-list{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;}
+  .model-chip{background:var(--panel-raised);border:1px solid var(--hair);padding:3px 9px;border-radius:3px;font-family:var(--mono);font-size:11.5px;}
+
+  .migration-line{position:relative;margin:26px 0 0 0;padding-left:6px;}
+  .migration-track{display:flex;border-top:1px solid var(--hair);padding-top:16px;gap:0;overflow-x:auto;padding-bottom:10px;}
+  .migration-step{flex:0 0 220px;padding-right:16px;position:relative;}
+  .migration-step::before{content:"";position:absolute;top:-21px;left:0;width:8px;height:8px;border-radius:50%;background:var(--teal);}
+  .migration-step b{display:block;font-family:var(--display);font-size:13.5px;margin-bottom:4px;}
+  .migration-step span.desc{color:var(--muted);font-size:12.5px;}
+
+  /* ---------- integration columns ---------- */
+  .int-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;}
+  .int-card{border:1px solid var(--hair);background:var(--panel);border-radius:var(--radius);padding:16px;}
+  .int-card .icon{width:26px;height:26px;border-radius:5px;margin-bottom:10px;display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:12px;font-weight:600;}
+  .int-card ul{margin:10px 0 0 0;padding-left:18px;color:var(--muted);font-size:13px;}
+  .int-card li{margin-bottom:5px;}
+
+  /* ---------- callout ---------- */
+  .callout{
+    border:1px solid var(--rose);
+    background:rgba(217,119,133,0.07);
+    border-radius:var(--radius);
+    padding:16px 18px;
+    margin-bottom:20px;
+  }
+  .callout .k{font-family:var(--display);font-weight:600;color:var(--rose);display:block;margin-bottom:6px;font-size:14.5px;}
+  .callout p{margin:0;color:var(--text);font-size:13.5px;}
+
+  /* ---------- checklist grid ---------- */
+  .check-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:10px;}
+  .check-item{border:1px solid var(--hair);background:var(--panel);padding:13px 15px;border-radius:var(--radius);display:flex;gap:10px;align-items:flex-start;}
+  .check-item .mark{color:var(--teal);font-family:var(--mono);font-size:14px;flex:none;margin-top:1px;}
+  .check-item div p{margin:2px 0 0 0;font-size:12.5px;color:var(--muted);}
+  .check-item div b{font-size:13.5px;font-family:var(--display);}
+
+  /* ---------- pipeline (ops) ---------- */
+  .ops-pipe{display:flex;flex-wrap:wrap;gap:0;align-items:stretch;margin-bottom:24px;}
+  .ops-pipe .stage{
+    border:1px solid var(--hair);background:var(--panel);
+    padding:14px 16px;border-radius:var(--radius);flex:1;min-width:170px;position:relative;
+  }
+  .ops-pipe .arrow{display:flex;align-items:center;color:var(--muted);padding:0 10px;font-family:var(--mono);}
+  .ops-pipe .stage b{font-family:var(--display);font-size:13.5px;display:block;margin-bottom:4px;}
+  .ops-pipe .stage span{color:var(--muted);font-size:12px;}
+
+  /* ---------- sequence player ---------- */
+  .seq-tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:18px;}
+  .seq-tab{
+    border:1px solid var(--hair);background:var(--panel);color:var(--muted);
+    padding:8px 14px;border-radius:20px;font-size:13px;cursor:pointer;font-family:var(--sans);
+  }
+  .seq-tab.active{border-color:var(--amber);color:var(--text);background:rgba(227,166,92,0.08);}
+  .seq-body{display:grid;grid-template-columns:1fr;gap:20px;}
+  @media(min-width:760px){ .seq-body{grid-template-columns:1.1fr 1fr;} }
+  .seq-progress{display:flex;gap:5px;margin-bottom:16px;}
+  .seq-progress i{flex:1;height:3px;background:var(--hair);border-radius:2px;}
+  .seq-progress i.done{background:var(--amber);}
+  .seq-controls{display:flex;gap:8px;margin-top:16px;}
+  .seq-step-card{border:1px solid var(--hair);background:var(--panel);border-radius:var(--radius);padding:18px;min-height:190px;display:flex;flex-direction:column;justify-content:space-between;}
+  .seq-step-card .n{font-family:var(--mono);color:var(--amber);font-size:12px;margin-bottom:8px;}
+  .seq-step-card h3{margin-bottom:8px;}
+  .seq-step-card p{color:var(--muted);font-size:13.5px;margin:0 0 10px 0;}
+  .seq-diagram-slot{border:1px solid var(--hair);background:var(--panel);border-radius:var(--radius);padding:12px;}
+  .seq-diagram-slot .diagram-wrap svg{min-width:640px;}
+
+  /* ---------- interview script ---------- */
+  .script-toggle{display:flex;gap:6px;margin-bottom:18px;}
+  .script-box{border:1px solid var(--hair);background:var(--panel);border-radius:var(--radius);padding:22px 24px;}
+  .script-box p{color:var(--text);max-width:70ch;font-size:14.5px;line-height:1.75;}
+  .script-box .tag60{display:none;}
+  .script-box.show60 .tag60{display:block;}
+  .script-box.show60 .tag300{display:none;}
+
+  footer{padding:34px 44px;color:var(--muted);font-size:12.5px;}
+
+  @media (max-width:860px){
+    .shell{grid-template-columns:1fr;}
+    header.topbar {
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 14px 20px;
+    }
+    nav.rail{
+      position:sticky;top:70px;height:auto;
+      display:flex;overflow-x:auto;padding:10px 12px;border-right:none;border-bottom:1px solid var(--hair);
+      z-index:30;background:var(--ink);
+      -ms-overflow-style: none; scrollbar-width: none;
+    }
+    nav.rail::-webkit-scrollbar { display: none; }
+    nav.rail a{padding:8px 12px;border-left:none;border-bottom:2px solid transparent;white-space:nowrap;}
+    nav.rail a.active{border-left-color:transparent;border-bottom-color:var(--amber);}
+    section{padding:40px 20px;}
+  }
+</style>
+</head>
+<body>
+
+<div id="tooltip"></div>
+
+<div class="shell">
+  <header class="topbar">
+    <div class="brand"><span class="mark"></span><b>Camply Backend</b><span>system architecture</span></div>
+    <div class="topbar-right">TypeScript · Express · Prisma · Redis</div>
+  </header>
+
+  <nav class="rail" id="rail">
+    <a href="#overview" class="dot-link"><span class="dot"></span>Overview</a>
+    <a href="#request-flow" class="dot-link"><span class="dot"></span>Request lifecycle</a>
+    <a href="#api-map" class="dot-link"><span class="dot"></span>API surface</a>
+    <a href="#auth" class="dot-link"><span class="dot"></span>Auth &amp; authorization</a>
+    <a href="#data-model" class="dot-link"><span class="dot"></span>Data model</a>
+    <a href="#platform" class="dot-link"><span class="dot"></span>Cache, realtime, integrations</a>
+    <a href="#async" class="dot-link"><span class="dot"></span>Background &amp; async</a>
+    <a href="#security" class="dot-link"><span class="dot"></span>Security &amp; errors</a>
+    <a href="#ops" class="dot-link"><span class="dot"></span>Deploy &amp; test</a>
+    <a href="#devlog" class="dot-link"><span class="dot"></span>Dev log — real bugs</a>
+    <a href="#sequences" class="dot-link"><span class="dot"></span>Sequence player</a>
+    <a href="#narrative" class="dot-link"><span class="dot"></span>Interview script</a>
+  </nav>
+
+  <main>
+
+    <!-- OVERVIEW -->
+    <section id="overview">
+      <p class="eyebrow">High-level design</p>
+      <h1>One request, eight hops, back again.</h1>
+      <p class="lede">Camply Backend is a modular TypeScript/Express monolith: routes hand off to controllers, controllers lean on services, and everything settles into Postgres through Prisma — with Redis, Socket.IO, Cloudinary and Razorpay wired in at the edges. Click any block below to see what it does and where it lives.</p>
+
+      <div class="stack-row" id="stack-row"></div>
+
+      <div class="diagram-card">
+        <div class="diagram-head">
+          <p>The request pipeline — click a node, or trace a request end to end.</p>
+          <button class="btn" id="trace-btn">Trace a request</button>
+        </div>
+        <div class="diagram-wrap" id="hero-diagram-slot"></div>
+        <div class="diagram-panel" id="hero-panel">Select a node to see its role and source references.</div>
+      </div>
+    </section>
+
+    <!-- REQUEST LIFECYCLE -->
+    <section id="request-flow">
+      <h2>Request lifecycle</h2>
+      <p class="section-intro">Every request — public or authenticated — passes through the same ordered chain before a controller ever touches Prisma.</p>
+      <ul class="steps" id="lifecycle-steps"></ul>
+    </section>
+
+    <!-- API MAP -->
+    <section id="api-map">
+      <h2>API surface</h2>
+      <p class="section-intro">Everything mounts under <span class="ref" data-desc="All fifteen route groups are mounted here, module by module." data-file="src/app.ts:133-147">src/app.ts:133-147</span>. Route files stay thin — middleware plus a controller mapping, nothing else.</p>
+      <input class="search" id="module-search" type="text" placeholder="Filter modules — try &quot;payments&quot; or &quot;chat&quot;">
+      <p class="module-legend">Six modules have their exact endpoint list from the README below — &#128274; auth required, &#177; optional auth.</p>
+      <div class="module-grid" id="module-grid"></div>
+    </section>
+
+    <!-- AUTH -->
+    <section id="auth">
+      <h2>Auth &amp; authorization</h2>
+      <p class="section-intro">Three layers stack on top of each other: token-based session auth, Google OAuth as an alternate entry point, and a Pro-plan gate for monetized routes.</p>
+      <div id="auth-accordion"></div>
+    </section>
+
+    <!-- DATA MODEL -->
+    <section id="data-model">
+      <h2>Data model</h2>
+      <p class="section-intro">The Prisma schema splits cleanly into three domains, plus enums that encode state machines for trust, subscriptions, matches, jobs and placements.</p>
+      <div class="cluster-grid" id="cluster-grid"></div>
+
+      <div class="migration-line">
+        <h3 style="margin-top:26px;">How it grew — migration history</h3>
+        <div class="migration-track" id="migration-track"></div>
+      </div>
+    </section>
+
+    <!-- PLATFORM -->
+    <section id="platform">
+      <h2>Cache, realtime &amp; integrations</h2>
+      <p class="section-intro">Redis and Socket.IO are load-bearing, not decorative — one carries state, the other carries events.</p>
+      <div class="int-grid" id="int-grid"></div>
+    </section>
+
+    <!-- ASYNC -->
+    <section id="async">
+      <h2>Background &amp; async work</h2>
+      <div class="callout">
+        <span class="k">There's no worker queue.</span>
+        <p>No BullMQ, no separate job runner. "Background" work is either handled inline during the request, or driven by an external webhook call. Say this plainly if asked — it's a legitimate scale-appropriate choice, not a gap.</p>
+      </div>
+      <ul class="steps" id="async-steps"></ul>
+    </section>
+
+    <!-- SECURITY -->
+    <section id="security">
+      <h2>Security, validation &amp; errors</h2>
+      <p class="section-intro">Six mechanisms carry most of the weight — worth naming in order if asked "how do you secure this API?"</p>
+      <div class="check-grid" id="check-grid"></div>
+    </section>
+
+    <!-- OPS -->
+    <section id="ops">
+      <h2>Deployment, config &amp; testing</h2>
+      <p class="section-intro">Config is entirely environment-driven; delivery runs through a lint/build/test gate before an Azure deploy.</p>
+      <div class="ops-pipe" id="ops-pipe"></div>
+      <div id="ops-accordion"></div>
+    </section>
+
+    <!-- DEV LOG -->
+    <section id="devlog">
+      <h2>Dev log — real bugs, real fixes</h2>
+      <p class="section-intro">Straight from <span class="ref" data-file="DEVLOG.md" data-desc="An honest log of real bugs hit while building Camply and how each was fixed.">DEVLOG.md</span> — this is the material that actually differentiates an interview answer. Naming the root cause, not just the symptom, is the whole point.</p>
+      <div id="devlog-accordion"></div>
+    </section>
+
+    <!-- SEQUENCES -->
+    <section id="sequences">
+      <h2>Sequence player</h2>
+      <p class="section-intro">Four flows worth being able to draw from memory. Step through each one — the diagram highlights as you go.</p>
+      <div class="seq-tabs" id="seq-tabs"></div>
+      <div class="seq-progress" id="seq-progress"></div>
+      <div class="seq-body">
+        <div class="seq-step-card">
+          <div>
+            <div class="n" id="seq-n">Step 1 / 7</div>
+            <h3 id="seq-title">—</h3>
+            <p id="seq-desc">—</p>
+          </div>
+          <div>
+            <div class="refs" id="seq-refs"></div>
+            <div class="seq-controls">
+              <button class="btn ghost" id="seq-prev">Back</button>
+              <button class="btn" id="seq-next">Next step</button>
+            </div>
+          </div>
+        </div>
+        <div class="seq-diagram-slot">
+          <div class="diagram-wrap" id="seq-diagram-slot"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- NARRATIVE -->
+    <section id="narrative">
+      <h2>Interview script</h2>
+      <p class="section-intro">Two lengths of the same story — pick one based on how much time the interviewer gives you.</p>
+      <div class="script-toggle">
+        <button class="btn" id="btn-300">5-minute version</button>
+        <button class="btn ghost" id="btn-60">60-second version</button>
+      </div>
+      <div class="script-box" id="script-box">
+        <div class="tag300">
+          <p>Camply Backend is a TypeScript Express monolith organized by modules: auth, users, posts, matching, teams, chats, placements, jobs, payments, and notifications. At startup, <span class="ref" data-file="src/server.ts:9-25" data-desc="Connects Redis first, then initializes Express and Socket.IO.">server.ts:9-25</span> connects Redis first, then initializes Express and Socket.IO.</p>
+          <p>The core stack is Prisma + PostgreSQL for relational data, Redis for caching, rate-limiting and sessions, JWT for auth, Passport for Google OAuth, Cloudinary for media, and Razorpay for subscriptions.</p>
+          <p>Request flow is route → auth/validation middleware → controller → services/utilities → Prisma → a standardized API response. Validation is done with Zod. Access tokens are short-lived; refresh tokens are stored in the database and sent via an httpOnly cookie with rotation support.</p>
+          <p>Feed responses are cached in Redis, with per-user vote state overlaid dynamically so the cached payload stays reusable across viewers.</p>
+          <p>Real-time runs on Socket.IO with JWT handshake auth. Users join a personal room and, where relevant, a chat room — powering live chat, typing indicators and event notifications.</p>
+          <p>Payments are subscription-based through Razorpay. Webhooks are verified with an HMAC signature over the raw request body, then subscription state syncs into both the Subscription and User tables.</p>
+          <p>Authorization layers normal auth middleware with a Pro-gate that checks cached subscription state and lazily expires outdated Pro users.</p>
+          <p>Errors are centralized, with Prisma-specific mappings, and every response uses the same success/error envelope. Architecturally, it's a clean modular monolith with clear boundaries, middleware-driven cross-cutting concerns, real-time support, and production-ready integrations.</p>
+        </div>
+        <div class="tag60">
+          <p>Camply Backend is a modular TypeScript Express monolith — auth, posts, matching, teams, chat, placements, payments, notifications — backed by Postgres via Prisma, with Redis handling caching, rate-limiting and sessions.</p>
+          <p>Requests flow through security middleware, JWT auth and Zod validation, into controllers and services, then out through a standardized response envelope. Real-time features run on Socket.IO with per-user and per-chat rooms.</p>
+          <p>Subscriptions are Razorpay-based, with signed webhooks syncing Pro status. And it's built with production concerns in mind — centralized error handling, rate limiting, httpOnly refresh cookies, and a CI-gated deploy to Azure.</p>
+        </div>
+      </div>
+    </section>
+
+    <footer>Built as a study reference for K's Camply Backend architecture walkthrough. Every chip cites a real file — hover or tap to see it.</footer>
+  </main>
+</div>
+
+<template id="diagram-template">
+  <svg viewBox="0 0 1300 520" xmlns="http://www.w3.org/2000/svg">
+    <g class="edges"></g>
+    <g class="nodes"></g>
+  </svg>
+</template>
+
+<script>
+/* ============================= DATA ============================= */
+
+const NODES = [
+  {id:'client', x:20, y:220, w:130, h:64, title:'Client', sub:'Web / mobile', desc:'Browser or app issuing HTTP requests and holding a persistent WebSocket connection.', refs:[]},
+  {id:'gateway', x:180, y:220, w:130, h:64, title:'Express gateway', sub:'Helmet · CORS · limiter', desc:'Security middleware, CORS allowlist, Redis-backed global rate limiter, raw webhook body capture, sessions.', refs:['src/app.ts:43-151','src/app.ts:47-69','src/app.ts:72-83']},
+  {id:'router', x:340, y:220, w:130, h:64, title:'Routers', sub:'/api/v1/*', desc:'Thin route files map middleware + controller per module — fifteen groups mounted in one place.', refs:['src/app.ts:133-147','src/routes/post.routes.ts:18-25','src/routes/auth.routes.ts:12-23']},
+  {id:'middleware', x:500, y:220, w:130, h:64, title:'Auth &amp; validation', sub:'JWT · Zod', desc:'Per-route authenticate / optionalAuth plus Zod schema validation before the controller runs.', refs:['src/middleware/auth.middleware.ts:9-51','src/middleware/validate.middleware.ts:5-26']},
+  {id:'controller', x:660, y:220, w:130, h:64, title:'Controllers', sub:'Business ops', desc:'Executes the actual operation via Prisma — pagination and select-optimised queries.', refs:['src/controllers/post.controller.ts:29-405','src/controllers/team.controller.ts:24-264']},
+  {id:'service', x:820, y:220, w:130, h:64, title:'Services', sub:'Cross-cutting', desc:'Trust updates, notifications, payment-gateway logic, mention parsing — the side effects controllers trigger.', refs:['src/services/trust.service.ts:18-38','src/services/notification.service.ts:22-64','src/services/payment.service.ts:47-319','src/services/mention.service.ts:34-77']},
+  {id:'prisma', x:980, y:220, w:130, h:64, title:'Prisma', sub:'Typed ORM', desc:'Typed query layer sitting directly over the Postgres schema.', refs:['prisma/schema.prisma:81-295']},
+  {id:'postgres', x:1140, y:220, w:140, h:64, title:'PostgreSQL', sub:'System of record', desc:'Relational storage for every domain module — social, career, monetization.', refs:['prisma/schema.prisma:81-549']},
+  {id:'redis', x:80, y:432, w:150, h:60, title:'Redis', sub:'Cache · limiter · sessions', desc:'App-cache helpers, the global rate limiter, session store, and feed caching with a dynamic per-user overlay.', refs:['src/config/redis.ts:31-71','src/app.ts:72-83','src/app.ts:97-113']},
+  {id:'socket', x:400, y:432, w:150, h:60, title:'Socket.IO', sub:'Real-time', desc:'JWT-authenticated handshake. Users join a personal room and chat rooms for live messaging and notifications.', refs:['src/config/socket.ts:58-73','src/config/socket.ts:79-90','src/config/socket.ts:93-149']},
+  {id:'cloudinary', x:720, y:432, w:150, h:60, title:'Cloudinary', sub:'Media uploads', desc:'Multer buffers uploads in memory and streams them up to Cloudinary.', refs:['src/config/cloudinary.ts:11-36']},
+  {id:'razorpay', x:1040, y:432, w:150, h:60, title:'Razorpay', sub:'Subscriptions', desc:'Subscription lifecycle plus HMAC-verified webhook events driving Pro status.', refs:['src/services/payment.service.ts:47-319','src/controllers/payment.controller.ts:53-106']},
+  {id:'response', x:565, y:14, w:190, h:46, title:'Response envelope', sub:'sendSuccess / sendError', desc:'Every route returns through the same normalized JSON contract, whichever controller produced it.', refs:['src/utils/apiResponse.ts:3-22']},
+];
+
+// main forward-flow chain, in trace order
+const CHAIN = ['client','gateway','router','middleware','controller','service','prisma','postgres'];
+
+// [fromId, toId, {dashed, response}]
+const EDGES = [
+  ['client','gateway',{}], ['gateway','router',{}], ['router','middleware',{}],
+  ['middleware','controller',{}], ['controller','service',{}], ['service','prisma',{}], ['prisma','postgres',{}],
+  ['gateway','redis',{dashed:true}], ['controller','redis',{dashed:true}],
+  ['controller','socket',{dashed:true}], ['service','socket',{dashed:true}], ['client','socket',{dashed:true}],
+  ['service','cloudinary',{dashed:true}],
+  ['service','razorpay',{dashed:true}],
+  ['postgres','response',{response:true}], ['response','client',{response:true}],
+];
+
+const STACK = ['Express','TypeScript','Prisma','PostgreSQL','Redis','Socket.IO','Cloudinary','Razorpay','Passport / Google OAuth','Zod','Vitest + Supertest'];
+
+const LIFECYCLE = [
+  {t:'Security &amp; parsing', d:'Helmet, CORS, the Redis-backed rate limiter, and body parsers run first for every request.', refs:['src/app.ts:47-95']},
+  {t:'Auth &amp; validation', d:'Per-route middleware checks the JWT (or allows anonymous access via optionalAuth) and validates the payload against a Zod schema.', refs:['src/routes/*.ts','src/middleware/validate.middleware.ts:5-26','src/middleware/auth.middleware.ts:9-51']},
+  {t:'Controller executes', d:'Business logic runs against Prisma, often with pagination and select-level query optimisation.', refs:['src/controllers/post.controller.ts:29-405','src/controllers/team.controller.ts:24-264']},
+  {t:'Services fire side effects', d:'Trust updates, notifications, payment logic, and mention parsing run as cross-cutting service calls.', refs:['src/services/trust.service.ts:18-38','src/services/notification.service.ts:22-64','src/services/payment.service.ts:47-319','src/services/mention.service.ts:34-77']},
+  {t:'Response normalized', d:'Every controller returns through the same sendSuccess / sendError envelope.', refs:['src/utils/apiResponse.ts:3-22']},
+  {t:'Fallback &amp; errors', d:'Unmatched routes hit a 404 handler; everything else lands in the centralized error middleware, which maps Prisma-specific errors.', refs:['src/app.ts:149-151','src/middleware/notFound.middleware.ts:3-8','src/middleware/error.middleware.ts:4-41']},
+];
+
+const MODULES = [
+  {name:'auth', path:'/api/v1/auth', desc:'Signup, login, refresh-token rotation, Google OAuth callback.', endpoints:[
+    ['POST','/register','—','Create account'],['POST','/login','—','Login → get tokens'],
+    ['POST','/refresh','—','Rotate refresh token'],['POST','/logout','—','Revoke refresh token'],
+    ['GET','/me','✓','Get current user'],
+  ]},
+  {name:'users', path:'/api/v1/users', desc:'Profile data and onboarding fields.', endpoints:[
+    ['GET','/:username','—','Public profile'],['GET','/:username/posts','—','Posts by user (paginated)'],
+    ['PATCH','/me','✓','Update profile'],['PATCH','/me/avatar','✓','Upload avatar'],
+    ['PATCH','/me/password','✓','Change password'],['GET','/search?q=','✓','Search users'],
+  ]},
+  {name:'posts', path:'/api/v1/posts', desc:'Feed, comments, votes — Redis-cached with a per-user vote overlay.', endpoints:[
+    ['GET','/','opt','Feed (paginated)'],['POST','/','✓','Create post'],
+    ['GET','/:id','opt','Single post + comments'],['PATCH','/:id','✓','Edit own post'],
+    ['DELETE','/:id','✓','Delete own post'],['POST','/:id/vote','✓','Upvote / downvote'],
+    ['POST','/:id/comments','✓','Add comment'],['DELETE','/:id/comments/:cId','✓','Delete comment'],
+  ]},
+  {name:'match', path:'/api/v1/match', desc:'Peer matching, backed by the MatchLike model.', endpoints:[
+    ['GET','/profiles','✓','Swipe queue'],['POST','/like','✓','Like or pass'],['GET','/matches','✓','Mutual matches'],
+  ]},
+  {name:'teams', path:'/api/v1/teams', desc:'Team formation and membership (Team, TeamMember).', endpoints:[
+    ['GET','/?q=&amp;hackathon=','✓','Browse / search teams'],['GET','/mine','✓','My teams'],
+    ['GET','/:id','✓','Get team by ID'],['POST','/','✓','Create team'],
+    ['PATCH','/:id','✓','Update team (owner)'],['POST','/:id/invite','✓','Invite member'],
+    ['DELETE','/:id/members/me','✓','Leave team'],['DELETE','/:id','✓','Delete team (owner)'],
+  ]},
+  {name:'chats', path:'/api/v1/chats', desc:'Messaging over REST + Socket.IO (Chat, ChatMember, Message).', endpoints:[
+    ['GET','/','✓','List all chats'],['POST','/','✓','Create a chat room'],
+    ['POST','/:id/join','✓','Join a chat'],['DELETE','/:id/members/me','✓','Leave a chat'],
+    ['GET','/:id/messages','✓','Paginated messages'],
+  ]},
+  {name:'upload', path:'/api/v1/upload', desc:'Media upload via Multer, streamed to Cloudinary.'},
+  {name:'jobs', path:'/api/v1/jobs', desc:'Job postings (Job model).'},
+  {name:'partner-tests', path:'/api/v1/partner-tests', desc:'Partner assessment tests (PartnerTest model).'},
+  {name:'placements', path:'/api/v1/placements', desc:'Placement posts, upvotes, and comments.'},
+  {name:'payments', path:'/api/v1/payments', desc:'Razorpay subscription checkout and webhook handling.'},
+  {name:'hackathons', path:'/api/v1/hackathons', desc:'Hackathon listings, synced from the Devpost API.'},
+  {name:'notifications', path:'/api/v1/notifications', desc:'In-app notifications, emitted live over Socket.IO.'},
+  {name:'events', path:'/api/v1/events', desc:'Hosted events (HostedEvent model).'},
+  {name:'admin', path:'/api/v1/admin', desc:'Admin-scoped operations layered across modules.'},
+];
+
+const AUTH_ACC = [
+  {t:'JWT access &amp; refresh', body:'A 15-minute access token comes back in the response body; a 7-day refresh token is set as an httpOnly cookie. Refresh tokens are persisted in the database, rotated on login, and capped at three device records. A 401 triggers POST /auth/refresh for a new access token; logout clears the cookie and deletes the DB row.', refs:['src/utils/jwt.ts:8-26','src/controllers/auth.controller.ts:137-155','src/controllers/google.auth.controller.ts:34-52']},
+  {t:'httpOnly refresh cookie', body:'The refresh token ships as an httpOnly cookie, scoped to /api/v1/auth — never exposed to client-side JS.', refs:['src/controllers/auth.controller.ts:18-25']},
+  {t:'authenticate &amp; optionalAuth', body:'authenticate reads the token and populates req.user for protected routes. optionalAuth supports mixed public/authenticated behaviour — the feed and placements list both use it.', refs:['src/middleware/auth.middleware.ts:14-33','src/middleware/auth.middleware.ts:36-51','src/routes/post.routes.ts:18','src/routes/placement.routes.ts:29']},
+  {t:'Google OAuth', body:'A Passport strategy links an existing account by email, or creates a pseudo-anonymous username for a new one. The callback issues a JWT plus refresh cookie and redirects the frontend with an access token.', refs:['src/config/passport.ts:86-156','src/controllers/google.auth.controller.ts:30-57']},
+  {t:'Pro gating', body:'requiresPro checks cached — falling back to database — subscription state, and lazily expires outdated Pro users as it goes.', refs:['src/middleware/pro.middleware.ts:28-103']},
+];
+
+const CLUSTERS = [
+  {name:'Identity &amp; social core', tag:'prisma/schema.prisma:81-295', models:['User','RefreshToken','Post','Comment','Vote','MatchLike','Team','TeamMember','Chat','ChatMember','Message']},
+  {name:'Career modules', tag:'prisma/schema.prisma:328-457', models:['Job','PartnerTest','PlacementPost','PlacementUpvote','PlacementComment']},
+  {name:'Monetization, events &amp; notifications', tag:'prisma/schema.prisma:463-549', models:['Subscription','Hackathon','HostedEvent','Notification']},
+];
+
+const MIGRATIONS = [
+  {t:'Base social / auth / chat', d:'The original schema — users, posts, chat.', ref:'...add_google_oauth/migration.sql:13-249'},
+  {t:'Onboarding fields', d:'Adds onboarding-specific user fields.', ref:'...add_onboarding_fields/migration.sql:1-4'},
+  {t:'Jobs &amp; placements', d:'Introduces the careers/placements schema.', ref:'...add_careers_placements_schema/migration.sql:1-149'},
+  {t:'Pro, hackathons, events, notifications', d:'Adds monetization and engagement surfaces.', ref:'...add_pro_subscriptions_hackathons_notifications/migration.sql:1-152'},
+];
+
+const INTEGRATIONS = [
+  {name:'Redis', icon:'R', color:'var(--teal)', items:[
+    {l:'Cache helpers — getCached / setCache / invalidateCache', r:'src/config/redis.ts:31-71'},
+    {l:'Backs the global rate limiter and session store', r:'src/app.ts:72-83, 97-113'},
+    {l:'Feed cache, with a dynamic per-user vote overlay', r:'src/controllers/post.controller.ts:40-113'},
+  ]},
+  {name:'Socket.IO', icon:'S', color:'var(--amber)', items:[
+    {l:'JWT-authenticated handshake — token passed in auth on connect', r:'src/config/socket.ts:58-73'},
+    {l:'Rooms: user:<id> and chat:<id>', r:'src/config/socket.ts:79-90'},
+    {l:'Client emits: join-chat, leave-chat, send-message, typing', r:'src/config/socket.ts:93-149'},
+    {l:'Server emits: new-message, user-typing, match, new-comment, new-vote, team-invite', r:'src/config/socket.ts:93-149'},
+    {l:'Notification service pushes into personal user rooms', r:'src/services/notification.service.ts:12-64'},
+  ]},
+  {name:'External services', icon:'X', color:'var(--rose)', items:[
+    {l:'Cloudinary — multer memory storage, streamed upload', r:'src/config/cloudinary.ts:11-36'},
+    {l:'Razorpay — subscription lifecycle + webhook verification', r:'src/services/payment.service.ts:47-319'},
+    {l:'Devpost API sync for hackathon listings', r:'src/services/hackathon.service.ts:20-76'},
+  ]},
+];
+
+const ASYNC_STEPS = [
+  {t:'Razorpay webhook', d:'Processes the subscription lifecycle immediately after sending a 200 acknowledgement.', refs:['src/controllers/payment.controller.ts:75-106']},
+  {t:'Hackathon sync', d:'An on-demand endpoint calls the external Devpost API — no scheduler involved.', refs:['src/controllers/hackathon.controller.ts:29-37','src/services/hackathon.service.ts:20-76']},
+  {t:'Mention parsing', d:'Creates database notifications and pushes them over the socket, inline in the request.', refs:['src/services/mention.service.ts:34-77']},
+  {t:'Trust score updates', d:'A non-fatal, asynchronous side effect of user actions.', refs:['src/services/trust.service.ts:15-31']},
+];
+
+const CHECKS = [
+  {t:'Zod validation', d:'Schema per module, applied through one middleware wrapper.', refs:['src/models/schemas.ts:4-224','src/middleware/validate.middleware.ts:5-26']},
+  {t:'Centralized error handling', d:'Consistent envelope, with explicit Prisma conflict / not-found mapping.', refs:['src/utils/apiResponse.ts:12-22','src/middleware/error.middleware.ts:12-40']},
+  {t:'Helmet + CORS allowlist', d:'Enforced strictly in production.', refs:['src/app.ts:47-69']},
+  {t:'Redis-backed rate limiting', d:'Applied globally, ahead of routing.', refs:['src/app.ts:72-83']},
+  {t:'httpOnly refresh cookie', d:'Refresh token never touches client-side JS.', refs:['src/controllers/auth.controller.ts:18-25']},
+  {t:'Webhook integrity', d:'Raw body captured before express.json, then checked against an HMAC signature.', refs:['src/app.ts:85-94','src/controllers/payment.controller.ts:58-73']},
+];
+
+const OPS_PIPE = [
+  {t:'Env-driven config', d:'DB, JWT, Cloudinary, Redis, Razorpay, Google OAuth, admin creds'},
+  {t:'Build', d:'TypeScript compiles to dist; tsx runs dev'},
+  {t:'Test', d:'Vitest + Supertest, heavy Redis/Prisma/payment mocking'},
+  {t:'CI gate', d:'Lint, tsc, tests on every change'},
+  {t:'Deploy', d:'Azure deploy workflow'},
+];
+
+const OPS_ACC = [
+  {t:'Configuration', body:'Every external dependency is environment-driven — database, JWT secret, Cloudinary, Redis, Razorpay, Google OAuth, admin credentials.', refs:['src/server.ts:7','src/app.ts:50','src/config/passport.ts:89-92','src/services/payment.service.ts:17-20']},
+  {t:'Build &amp; run scripts', body:'TypeScript compiles to dist for production; tsx drives the dev server; Prisma handles migrations and seeding.', refs:['package.json:7-19']},
+  {t:'CI/CD', body:'An Azure deploy workflow runs alongside a separate security/build workflow covering lint, tsc, and tests.', refs:['.github/workflows/main_camply-backend.yml:4-65','.github/workflows/security.yml:1-38']},
+  {t:'Testing', body:'Vitest with Supertest, mocking Redis, Prisma and the payment gateway heavily, mixing unit and integration-style route tests.', refs:['tests/vitest.setup.ts:9-41','tests/unit/auth.test.ts:7-223','tests/post.integration.test.ts:7-143']},
+];
+
+const DEVLOG = [
+  {t:'Deleted posts still showing in feed', cause:'The deletePost controller removed the row from Postgres but never invalidated the Redis feed cache, so the feed kept serving a stale, cached copy for up to five minutes.', fix:"await prisma.post.delete(...) → then await invalidateCache('feed:*')", lesson:'Every write that touches cached data — create, update, delete — has to invalidate the relevant cache keys.'},
+  {t:'Three-dot menu invisible on mobile', cause:'The post-options button used opacity-0 group-hover:opacity-100 — fine on desktop, but mobile has no hover state, so the button was permanently invisible.', fix:'opacity-0 group-hover:opacity-100 → opacity-100 md:opacity-0 md:group-hover:opacity-100', lesson:"Never gate an interactive control behind hover-only CSS — keep it visible by default on touch devices."},
+  {t:'Comment count stale after commenting', cause:'addComment saved the comment to the DB but never busted the feed cache, so the feed kept returning the old _count.comments value.', fix:"After creating the comment: await invalidateCache('feed:*')", lesson:'Any action that changes a cached aggregate needs to invalidate that cache — not just the write itself.'},
+  {t:'Feed not refreshing after a new post', cause:"The frontend called React Query's refetch(), which only re-runs the exact current query — if filters differed or the query was stale, it silently did nothing.", fix:"refetch() → queryClient.invalidateQueries({ queryKey: ['feed'] })", lesson:'invalidateQueries guarantees freshness across every filter/page variant; refetch() only covers the one you already have open.'},
+  {t:'Share button copied the wrong URL', cause:'The share handler used window.location.origin, which returns only the domain — not the specific post path.', fix:'window.location.origin → `${origin}/posts/${id}`, with navigator.share on mobile and clipboard fallback on desktop', lesson:'Test share/copy flows end-to-end — origin is never the full resource URL.'},
+  {t:'Voting made posts disappear from the feed', cause:'Both the backend (invalidateCache on every vote) and the frontend (invalidateQueries on every vote) were busting the feed cache at once — triggering a full refetch that reset pagination and reordered posts.', fix:'Stopped busting the feed cache on vote entirely; vote counts update instantly via optimistic UI instead.', lesson:'Not every write needs to invalidate the whole feed — over-invalidation is worse UX than briefly stale counts.', table:[['Create post','Yes'],['Delete post','Yes'],['Edit post','Yes'],['Vote on post','No'],['Add comment','Yes — count changes'],['Delete comment','No']]},
+  {t:"Vote state didn't roll back on failure", cause:'previousVote was captured before the optimistic update, but the catch block never actually used it to restore state.', fix:'Save vote, upvotes and downvotes together before the optimistic update, then restore all three in the catch block.', lesson:'An optimistic update needs a complete rollback of every piece of state it touched — not just one.'},
+  {t:'Vote counts wrong after a page refresh', cause:'The feed cache stored vote counts at cache-write time; new votes updated the DB but the 5-minute-TTL cache stayed stale.', fix:'votePost now regroups votes from the DB and returns fresh upvote/downvote/userVote counts on every call, and the frontend syncs to that response.', lesson:"For user-specific, real-time actions, return the server's ground truth in the response — don't let the client compute or assume the new state."},
+];
+
+const SEQUENCES = {
+  login: {label:'Login', highlight:['client','gateway','router','middleware','controller','prisma','postgres','response'],
+    steps:[
+      {t:'Client sends credentials', d:'POST /api/v1/auth/login hits the gateway and router.', refs:['src/controllers/auth.controller.ts:107-158']},
+      {t:'Validate the body', d:'Zod checks the payload shape before anything touches the database.', refs:['src/middleware/validate.middleware.ts:5-26']},
+      {t:'Find user + compare hash', d:'Looks the user up and checks the password with bcrypt.', refs:['src/controllers/auth.controller.ts:107-158']},
+      {t:'Issue tokens', d:'A short-lived access token and a refresh token are generated together.', refs:['src/utils/jwt.ts:8-26']},
+      {t:'Persist &amp; rotate refresh token', d:'Stored in the RefreshToken table, capped at three device records.', refs:['src/controllers/auth.controller.ts:137-155']},
+      {t:'Set the refresh cookie', d:'httpOnly, scoped to /api/v1/auth.', refs:['src/controllers/auth.controller.ts:18-25']},
+      {t:'Return the response', d:'{ user, accessToken } comes back through the standard envelope.', refs:['src/utils/apiResponse.ts:3-22']},
+    ]},
+  feed: {label:'Feed read', highlight:['client','gateway','router','middleware','controller','redis','prisma','postgres','response'],
+    steps:[
+      {t:'Client requests the feed', d:'GET /api/v1/posts with page, limit and category.', refs:['src/controllers/post.controller.ts:29-113']},
+      {t:'optionalAuth runs', d:'Parses the token if one is present, without requiring it.', refs:['src/middleware/auth.middleware.ts:36-51']},
+      {t:'Check the Redis cache', d:'Looks up feed:<category>:<page>:<limit>.', refs:['src/config/redis.ts:31-71']},
+      {t:'On a miss, query &amp; cache', d:'Posts plus grouped vote counts are fetched and the payload is cached.', refs:['src/controllers/post.controller.ts:40-113']},
+      {t:'Overlay the viewer\'s votes', d:'If authenticated, the user\'s own votes are attached on top of the cached payload.', refs:['src/controllers/post.controller.ts:40-113']},
+      {t:'Return the paginated feed', d:'Standard success envelope, ready to render.', refs:['src/utils/apiResponse.ts:3-22']},
+    ]},
+  post: {label:'Create post', highlight:['client','gateway','router','middleware','controller','service','redis','prisma','postgres','response'],
+    steps:[
+      {t:'Client submits a post', d:'POST /api/v1/posts, authenticated.', refs:['src/controllers/post.controller.ts:29-405']},
+      {t:'Auth middleware', d:'Confirms the JWT and populates req.user.', refs:['src/middleware/auth.middleware.ts:14-33']},
+      {t:'Validate the body', d:'Zod schema for the post payload.', refs:['src/middleware/validate.middleware.ts:5-26']},
+      {t:'Create the row', d:'Persisted via Prisma.', refs:['src/controllers/post.controller.ts:29-405']},
+      {t:'Award trust points', d:'A non-fatal service side effect.', refs:['src/services/trust.service.ts:18-38']},
+      {t:'Invalidate the feed cache', d:'Clears feed:* so the next read is fresh.', refs:['src/config/redis.ts:31-71']},
+      {t:'Return the created post', d:'Standard success envelope.', refs:['src/utils/apiResponse.ts:3-22']},
+    ]},
+  webhook: {label:'Pro webhook', highlight:['razorpay','gateway','router','service','prisma','postgres','socket'],
+    steps:[
+      {t:'Razorpay calls the webhook', d:'POST /api/v1/payments/webhook.', refs:['src/controllers/payment.controller.ts:53-106']},
+      {t:'Verify the signature', d:'Raw body was captured ahead of express.json; HMAC is checked against it.', refs:['src/controllers/payment.controller.ts:58-73']},
+      {t:'Acknowledge immediately', d:'A 200 is sent back before further processing.', refs:['src/controllers/payment.controller.ts:75-106']},
+      {t:'Handle the event', d:'subscription.activated (or similar) is processed asynchronously.', refs:['src/services/payment.service.ts:47-319']},
+      {t:'Update Subscription', d:'Record moves to ACTIVE.', refs:['src/services/payment.service.ts:47-319']},
+      {t:'Update User', d:'isPro flips true, status ACTIVE, end date set.', refs:['src/services/payment.service.ts:47-319']},
+      {t:'Emit over Socket.IO', d:'pro:activated is pushed into the user\'s personal room.', refs:['src/config/socket.ts:93-149']},
+    ]},
+};
+
+/* ============================= HELPERS ============================= */
+
+function refChip(ref){
+  const b = document.createElement('button');
+  b.className = 'ref';
+  b.type = 'button';
+  b.dataset.file = ref;
+  b.dataset.desc = '';
+  b.textContent = ref;
+  return b;
+}
+function refRow(refs){
+  const wrap = document.createElement('div');
+  wrap.className = 'refs';
+  (refs||[]).forEach(r => wrap.appendChild(refChip(r)));
+  return wrap;
+}
+
+/* ---------- tooltip ---------- */
+const tooltip = document.getElementById('tooltip');
+document.addEventListener('click', (e)=>{
+  const chip = e.target.closest('.ref');
+  if(!chip){ tooltip.style.display='none'; return; }
+  const file = chip.dataset.file;
+  const desc = chip.dataset.desc;
+  tooltip.innerHTML = '<span class="t-file">'+file+'</span>' + (desc || 'Referenced source location.');
+  const r = chip.getBoundingClientRect();
+  tooltip.style.display='block';
+  const top = r.bottom + 8;
+  let left = r.left;
+  const maxLeft = window.innerWidth - 296;
+  if(left > maxLeft) left = maxLeft;
+  tooltip.style.top = top+'px';
+  tooltip.style.left = left+'px';
+  e.stopPropagation();
+});
+document.addEventListener('scroll', ()=>{ tooltip.style.display='none'; }, true);
+
+/* ============================= BUILD: STACK PILLS ============================= */
+(function(){
+  const row = document.getElementById('stack-row');
+  STACK.forEach(s=>{
+    const p = document.createElement('span');
+    p.className='pill'; p.textContent=s; row.appendChild(p);
+  });
+})();
+
+/* ============================= BUILD: DIAGRAM ============================= */
+function nodeById(id){ return NODES.find(n=>n.id===id); }
+
+function buildDiagramSVG(){
+  const tpl = document.getElementById('diagram-template');
+  const frag = tpl.content.cloneNode(true);
+  const svg = frag.querySelector('svg');
+  const edgesG = svg.querySelector('.edges');
+  const nodesG = svg.querySelector('.nodes');
+
+  EDGES.forEach(([fromId,toId,opts])=>{
+    const a = nodeById(fromId), b = nodeById(toId);
+    const path = document.createElementNS('http://www.w3.org/2000/svg','path');
+    let d;
+    if(opts.response){
+      // arcing return path across the top
+      const ax = a.x + a.w/2, ay = fromId==='postgres' ? a.y : a.y + a.h;
+      const bx = b.x + b.w/2, by = toId==='client' ? b.y : b.y + b.h;
+      d = `M ${ax} ${ay} C ${ax} ${ay-90}, ${bx} ${by-90}, ${bx} ${by}`;
+    } else if (CHAIN.includes(fromId) && CHAIN.includes(toId) && Math.abs(CHAIN.indexOf(fromId)-CHAIN.indexOf(toId))===1){
+      const ax = a.x + a.w, ay = a.y + a.h/2;
+      const bx = b.x, by = b.y + b.h/2;
+      d = `M ${ax} ${ay} L ${bx} ${by}`;
+    } else {
+      // bus-style orthogonal connector down to the integration row
+      const ax = a.x + a.w/2, ay = a.y + a.h;
+      const bx = b.x + b.w/2, by = b.y;
+      const bus = ay + (by-ay)/2;
+      d = `M ${ax} ${ay} L ${ax} ${bus} L ${bx} ${bus} L ${bx} ${by}`;
+    }
+    path.setAttribute('d', d);
+    path.setAttribute('class', 'edge' + (opts.dashed?' dashed':'') + (opts.response?' response':''));
+    path.dataset.from = fromId; path.dataset.to = toId;
+    edgesG.appendChild(path);
+  });
+
+  NODES.forEach(n=>{
+    const g = document.createElementNS('http://www.w3.org/2000/svg','g');
+    g.setAttribute('class','node');
+    g.dataset.id = n.id;
+    g.innerHTML = `
+      <rect x="${n.x}" y="${n.y}" width="${n.w}" height="${n.h}" rx="4"></rect>
+      <text class="title" x="${n.x+14}" y="${n.y+26}">${n.title}</text>
+      <text class="sub" x="${n.x+14}" y="${n.y+44}">${n.sub}</text>
+    `;
+    nodesG.appendChild(g);
+  });
+
+  return svg;
+}
+
+function wireDiagram(svg, panelEl, onNodeClick){
+  svg.querySelectorAll('.node').forEach(g=>{
+    g.addEventListener('click', ()=>{
+      const n = nodeById(g.dataset.id);
+      if(panelEl){
+        panelEl.innerHTML = '<b>'+n.title+'</b> — '+n.desc;
+        const refs = refRow(n.refs);
+        if(n.refs.length) panelEl.appendChild(refs);
+      }
+      if(onNodeClick) onNodeClick(n.id);
+    });
+  });
+}
+
+function setActiveNodes(svg, ids){
+  svg.querySelectorAll('.node').forEach(g=>{
+    g.classList.toggle('active', ids.includes(g.dataset.id));
+  });
+  svg.querySelectorAll('.edge').forEach(p=>{
+    const on = ids.includes(p.dataset.from) && ids.includes(p.dataset.to);
+    p.classList.toggle('active', on);
+  });
+}
+
+const heroSvg = buildDiagramSVG();
+document.getElementById('hero-diagram-slot').appendChild(heroSvg);
+wireDiagram(heroSvg, document.getElementById('hero-panel'));
+
+document.getElementById('trace-btn').addEventListener('click', ()=>{
+  const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const panel = document.getElementById('hero-panel');
+  if(reduced){
+    setActiveNodes(heroSvg, CHAIN);
+    panel.innerHTML = '<b>Full pipeline</b> — client through gateway, router, middleware, controller, service, Prisma, to Postgres.';
+    setTimeout(()=>setActiveNodes(heroSvg, []), 2200);
+    return;
+  }
+  let i=0;
+  setActiveNodes(heroSvg, []);
+  const timer = setInterval(()=>{
+    setActiveNodes(heroSvg, CHAIN.slice(0,i+1));
+    const n = nodeById(CHAIN[i]);
+    panel.innerHTML = '<b>'+n.title+'</b> — '+n.desc;
+    i++;
+    if(i>=CHAIN.length){
+      clearInterval(timer);
+      setTimeout(()=>setActiveNodes(heroSvg, []), 1400);
+    }
+  }, 480);
+});
+
+/* ============================= BUILD: LIFECYCLE STEPS ============================= */
+(function(){
+  const ul = document.getElementById('lifecycle-steps');
+  LIFECYCLE.forEach(s=>{
+    const li = document.createElement('li');
+    li.innerHTML = '<div class="step-title">'+s.t+'</div><div class="step-desc">'+s.d+'</div>';
+    li.appendChild(refRow(s.refs));
+    ul.appendChild(li);
+  });
+})();
+
+/* ============================= BUILD: MODULE GRID ============================= */
+(function(){
+  const grid = document.getElementById('module-grid');
+  MODULES.forEach(m=>{
+    const card = document.createElement('div');
+    card.className='module-card';
+    card.dataset.name = m.name;
+    card.innerHTML = '<span class="path">'+m.path+'</span><p>'+m.desc+'</p>';
+    if(m.endpoints){
+      card.classList.add('has-endpoints');
+      const tbl = document.createElement('table');
+      tbl.className = 'ep-table';
+      m.endpoints.forEach(([method,ep,auth,d])=>{
+        const tr = document.createElement('tr');
+        tr.innerHTML = '<td class="ep-method ep-'+method.toLowerCase()+'">'+method+'</td>'
+          +'<td class="ep-path">'+ep+'</td>'
+          +'<td class="ep-auth">'+(auth==='✓'?'&#128274;':auth==='opt'?'&#177;':'')+'</td>'
+          +'<td class="ep-d">'+d+'</td>';
+        tbl.appendChild(tr);
+      });
+      card.appendChild(tbl);
+    }
+    grid.appendChild(card);
+  });
+  document.getElementById('module-search').addEventListener('input', (e)=>{
+    const q = e.target.value.trim().toLowerCase();
+    grid.querySelectorAll('.module-card').forEach(c=>{
+      const match = c.dataset.name.includes(q) || c.textContent.toLowerCase().includes(q);
+      c.classList.toggle('hide', q.length>0 && !match);
+    });
+  });
+})();
+
+/* ============================= ACCORDION BUILDER ============================= */
+function buildAccordion(container, items){
+  items.forEach(it=>{
+    const div = document.createElement('div');
+    div.className='acc-item';
+    div.innerHTML = `
+      <div class="acc-head"><span>${it.t}</span><span class="chev">+</span></div>
+      <div class="acc-body"><p style="max-width:none;margin:12px 0 0 0;">${it.body}</p></div>
+    `;
+    const body = div.querySelector('.acc-body');
+    body.appendChild(refRow(it.refs));
+    div.querySelector('.acc-head').addEventListener('click', ()=>{
+      const wasOpen = div.classList.contains('open');
+      container.querySelectorAll('.acc-item').forEach(o=>{
+        o.classList.remove('open'); o.querySelector('.acc-body').style.maxHeight=null;
+      });
+      if(!wasOpen){
+        div.classList.add('open');
+        body.style.maxHeight = body.scrollHeight+40+'px';
+      }
+    });
+    container.appendChild(div);
+  });
+}
+buildAccordion(document.getElementById('auth-accordion'), AUTH_ACC);
+buildAccordion(document.getElementById('ops-accordion'), OPS_ACC);
+
+/* ============================= BUILD: DEV LOG ============================= */
+(function(){
+  const container = document.getElementById('devlog-accordion');
+  DEVLOG.forEach((bug,i)=>{
+    const div = document.createElement('div');
+    div.className='acc-item';
+    let tableHtml = '';
+    if(bug.table){
+      tableHtml = '<table class="bust-table"><tr><th>Action</th><th>Bust cache?</th></tr>'
+        + bug.table.map(([a,b])=>'<tr><td>'+a+'</td><td>'+b+'</td></tr>').join('')
+        + '</table>';
+    }
+    div.innerHTML = `
+      <div class="acc-head"><span>${i+1}. ${bug.t}</span><span class="chev">+</span></div>
+      <div class="acc-body">
+        <p style="max-width:none;margin:12px 0 0 0;"><b class="bug-label">Root cause —</b> ${bug.cause}</p>
+        <p style="max-width:none;" class="fix-line"><b class="bug-label">Fix —</b> <code>${bug.fix}</code></p>
+        ${tableHtml}
+        <p style="max-width:none;"><b class="bug-label">Lesson —</b> ${bug.lesson}</p>
+      </div>
+    `;
+    const body = div.querySelector('.acc-body');
+    div.querySelector('.acc-head').addEventListener('click', ()=>{
+      const wasOpen = div.classList.contains('open');
+      container.querySelectorAll('.acc-item').forEach(o=>{
+        o.classList.remove('open'); o.querySelector('.acc-body').style.maxHeight=null;
+      });
+      if(!wasOpen){
+        div.classList.add('open');
+        body.style.maxHeight = body.scrollHeight+40+'px';
+      }
+    });
+    container.appendChild(div);
+  });
+})();
+
+/* ============================= BUILD: DATA MODEL ============================= */
+(function(){
+  const grid = document.getElementById('cluster-grid');
+  CLUSTERS.forEach(c=>{
+    const div = document.createElement('div');
+    div.className='cluster';
+    div.innerHTML = '<h3>'+c.name+'</h3><span class="tag">'+c.tag+'</span>';
+    const list = document.createElement('div'); list.className='model-list';
+    c.models.forEach(m=>{
+      const chip = document.createElement('span'); chip.className='model-chip'; chip.textContent=m;
+      list.appendChild(chip);
+    });
+    div.appendChild(list);
+    grid.appendChild(div);
+  });
+
+  const track = document.getElementById('migration-track');
+  MIGRATIONS.forEach(m=>{
+    const step = document.createElement('div');
+    step.className='migration-step';
+    step.innerHTML = '<b>'+m.t+'</b><span class="desc">'+m.d+'</span>';
+    const chip = refChip(m.ref);
+    step.appendChild(document.createElement('br'));
+    step.appendChild(chip);
+    track.appendChild(step);
+  });
+})();
+
+/* ============================= BUILD: INTEGRATIONS ============================= */
+(function(){
+  const grid = document.getElementById('int-grid');
+  INTEGRATIONS.forEach(card=>{
+    const div = document.createElement('div');
+    div.className='int-card';
+    div.innerHTML = '<div class="icon" style="background:'+card.color+'22;color:'+card.color+';border:1px solid '+card.color+'55;">'+card.icon+'</div><h3>'+card.name+'</h3>';
+    const ul = document.createElement('ul');
+    card.items.forEach(it=>{
+      const li = document.createElement('li');
+      li.textContent = it.l + '  ';
+      li.appendChild(refChip(it.r));
+      ul.appendChild(li);
+    });
+    div.appendChild(ul);
+    grid.appendChild(div);
+  });
+})();
+
+/* ============================= BUILD: ASYNC STEPS ============================= */
+(function(){
+  const ul = document.getElementById('async-steps');
+  ASYNC_STEPS.forEach(s=>{
+    const li = document.createElement('li');
+    li.innerHTML = '<div class="step-title">'+s.t+'</div><div class="step-desc">'+s.d+'</div>';
+    li.appendChild(refRow(s.refs));
+    ul.appendChild(li);
+  });
+})();
+
+/* ============================= BUILD: SECURITY CHECKS ============================= */
+(function(){
+  const grid = document.getElementById('check-grid');
+  CHECKS.forEach(c=>{
+    const div = document.createElement('div');
+    div.className='check-item';
+    const refsHtml = (c.refs||[]).map(r=>'').join('');
+    div.innerHTML = '<span class="mark">&#10003;</span><div><b>'+c.t+'</b><p>'+c.d+'</p></div>';
+    div.querySelector('div').appendChild(refRow(c.refs));
+    grid.appendChild(div);
+  });
+})();
+
+/* ============================= BUILD: OPS PIPE ============================= */
+(function(){
+  const wrap = document.getElementById('ops-pipe');
+  OPS_PIPE.forEach((s,i)=>{
+    const stage = document.createElement('div');
+    stage.className='stage';
+    stage.innerHTML = '<b>'+s.t+'</b><span>'+s.d+'</span>';
+    wrap.appendChild(stage);
+    if(i < OPS_PIPE.length-1){
+      const arrow = document.createElement('div');
+      arrow.className='arrow'; arrow.textContent='→';
+      wrap.appendChild(arrow);
+    }
+  });
+})();
+
+/* ============================= SEQUENCE PLAYER ============================= */
+const seqKeys = Object.keys(SEQUENCES);
+let currentSeq = 'login';
+let currentStep = 0;
+const seqSvg = buildDiagramSVG();
+document.getElementById('seq-diagram-slot').appendChild(seqSvg);
+
+function renderSeqTabs(){
+  const wrap = document.getElementById('seq-tabs');
+  wrap.innerHTML='';
+  seqKeys.forEach(k=>{
+    const b = document.createElement('button');
+    b.className='seq-tab'+(k===currentSeq?' active':'');
+    b.textContent = SEQUENCES[k].label;
+    b.addEventListener('click', ()=>{ currentSeq=k; currentStep=0; renderSeqTabs(); renderSeqStep(); });
+    wrap.appendChild(b);
+  });
+}
+
+function renderSeqStep(){
+  const seq = SEQUENCES[currentSeq];
+  const step = seq.steps[currentStep];
+  document.getElementById('seq-n').textContent = 'Step '+(currentStep+1)+' / '+seq.steps.length;
+  document.getElementById('seq-title').textContent = step.t;
+  document.getElementById('seq-desc').textContent = step.d;
+  const refsEl = document.getElementById('seq-refs');
+  refsEl.innerHTML='';
+  refsEl.appendChild(refRow(step.refs));
+
+  const prog = document.getElementById('seq-progress');
+  prog.innerHTML='';
+  seq.steps.forEach((_,i)=>{
+    const bar = document.createElement('i');
+    if(i<=currentStep) bar.classList.add('done');
+    prog.appendChild(bar);
+  });
+
+  // highlight cumulative nodes up to a point proportional to progress
+  const frac = (currentStep+1)/seq.steps.length;
+  const count = Math.max(1, Math.round(seq.highlight.length*frac));
+  setActiveNodes(seqSvg, seq.highlight.slice(0,count));
+
+  document.getElementById('seq-prev').disabled = currentStep===0;
+  document.getElementById('seq-next').textContent = currentStep===seq.steps.length-1 ? 'Restart' : 'Next step';
+}
+
+document.getElementById('seq-prev').addEventListener('click', ()=>{
+  if(currentStep>0){ currentStep--; renderSeqStep(); }
+});
+document.getElementById('seq-next').addEventListener('click', ()=>{
+  const seq = SEQUENCES[currentSeq];
+  if(currentStep===seq.steps.length-1){ currentStep=0; } else { currentStep++; }
+  renderSeqStep();
+});
+
+renderSeqTabs();
+renderSeqStep();
+
+/* ============================= INTERVIEW SCRIPT TOGGLE ============================= */
+(function(){
+  const box = document.getElementById('script-box');
+  const b300 = document.getElementById('btn-300');
+  const b60 = document.getElementById('btn-60');
+  b300.addEventListener('click', ()=>{ box.classList.remove('show60'); b300.classList.remove('ghost'); b60.classList.add('ghost'); });
+  b60.addEventListener('click', ()=>{ box.classList.add('show60'); b60.classList.remove('ghost'); b300.classList.add('ghost'); });
+})();
+
+/* ============================= SCROLLSPY ============================= */
+(function(){
+  const links = Array.from(document.querySelectorAll('nav.rail a'));
+  const targets = links.map(l=>document.querySelector(l.getAttribute('href')));
+  let lastIdx = -1;
+  function onScroll(){
+    let idx = 0;
+    const y = window.scrollY + window.innerHeight / 3;
+    targets.forEach((t,i)=>{ if(t && t.offsetTop <= y) idx = i; });
+    if (idx !== lastIdx) {
+      links.forEach((l,i)=>l.classList.toggle('active', i===idx));
+      if(window.innerWidth <= 860 && links[idx]){
+        links[idx].scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+      }
+      lastIdx = idx;
+    }
+  }
+  document.addEventListener('scroll', onScroll, {passive:true});
+  onScroll();
+})();
+</script>
+</body>
+</html>
