@@ -12,14 +12,14 @@ from livekit.agents import (
     cli,
     llm
 )
-from livekit.agents.pipeline import VoicePipelineAgent
+from livekit.agents.voice import Agent
 from livekit.plugins import openai, silero
 
 logger = logging.getLogger("agent")
 
 # Phase 5: Agentic Tool Execution
-class SystemUptimeTool(llm.AgentFunctionContext):
-    @llm.ai_callable(description="Check the system uptime.")
+class SystemUptimeTool(llm.ToolContext):
+    @llm.function_tool(description="Check the system uptime.")
     async def check_uptime(self):
         logger.info("Executing Tool: SystemUptimeTool")
         return "The system has been up for 42 hours."
@@ -43,10 +43,10 @@ async def entrypoint(ctx: JobContext):
     logger.info(f"Connected to room: {ctx.room.name}")
     
     # Phase 2: Configure Local Models
-    # Local vLLM
+    # Local vLLM/Ollama
     local_llm = openai.LLM(
-        base_url="http://localhost:8000/v1",
-        model="Qwen/Qwen2.5-7B-Instruct-AWQ",
+        base_url="http://localhost:11434/v1",
+        model="qwen2.5:0.5b",
         api_key="not-needed"
     )
     
@@ -59,7 +59,7 @@ async def entrypoint(ctx: JobContext):
     
     # Local Faster-Whisper (mapped via OpenAI-compatible endpoint for integration)
     local_stt = openai.STT(
-        base_url="http://localhost:8000/v1",
+        base_url="http://localhost:8080/v1",
         model="whisper-1",
         api_key="not-needed"
     )
@@ -67,7 +67,7 @@ async def entrypoint(ctx: JobContext):
     fctx = SystemUptimeTool()
     
     # Pipeline Agent
-    agent = VoicePipelineAgent(
+    agent = Agent(
         vad=silero.VAD.load(),
         stt=local_stt,
         llm=local_llm,

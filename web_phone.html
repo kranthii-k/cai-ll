@@ -3,180 +3,863 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>AI Voice Agent</title>
+    <title>AI Voice Agent — Full-Duplex Telephony Bridge</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
-        body {
+        :root {
+            --bg-base: #090d16;
+            --bg-surface: #111827;
+            --bg-elevated: #1e293b;
+            --border-dim: #334155;
+            --border-highlight: #475569;
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+            --teal: #14b8a6;
+            --teal-glow: rgba(20, 184, 166, 0.35);
+            --blue: #38bdf8;
+            --blue-glow: rgba(56, 189, 248, 0.35);
+            --amber: #f59e0b;
+            --amber-glow: rgba(245, 158, 11, 0.35);
+            --purple: #a855f7;
+            --purple-glow: rgba(168, 85, 247, 0.35);
+            --rose: #f43f5e;
+            --rose-glow: rgba(244, 63, 94, 0.4);
+            --green: #10b981;
+            --font-sans: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+            --font-mono: 'JetBrains Mono', monospace;
+        }
+
+        * {
+            box-sizing: border-box;
             margin: 0;
             padding: 0;
-            background: #0f172a;
-            color: white;
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+
+        body {
+            background-color: var(--bg-base);
+            color: var(--text-main);
+            font-family: var(--font-sans);
+            min-height: 100vh;
             display: flex;
             flex-direction: column;
+            overflow-x: hidden;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        /* Top Header */
+        header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 1rem 2rem;
+            background: rgba(17, 24, 39, 0.8);
+            backdrop-filter: blur(12px);
+            border-bottom: 1px solid var(--border-dim);
+            z-index: 10;
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        .brand-icon {
+            width: 32px;
+            height: 32px;
+            border-radius: 8px;
+            background: linear-gradient(135deg, var(--teal), var(--blue));
+            display: flex;
             align-items: center;
             justify-content: center;
-            height: 100vh;
-            overflow: hidden;
+            font-size: 1.1rem;
+            box-shadow: 0 0 15px var(--teal-glow);
         }
 
-        .container {
-            text-align: center;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            gap: 2rem;
-        }
-
-        h1 {
-            font-size: 2rem;
-            font-weight: 600;
-            margin: 0;
-            background: linear-gradient(135deg, #38bdf8, #818cf8);
+        .brand-title {
+            font-size: 1.15rem;
+            font-weight: 700;
+            letter-spacing: -0.02em;
+            background: linear-gradient(to right, #fff, #cbd5e1);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
         }
 
-        .status {
-            font-size: 1rem;
-            color: #94a3b8;
-            min-height: 1.5rem;
+        .header-badges {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
         }
 
-        .call-btn {
-            width: 120px;
-            height: 120px;
+        .badge {
+            font-size: 0.75rem;
+            font-family: var(--font-mono);
+            font-weight: 500;
+            padding: 0.35rem 0.7rem;
+            border-radius: 9999px;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            border: 1px solid transparent;
+        }
+
+        .badge-duplex {
+            background: rgba(20, 184, 166, 0.12);
+            color: var(--teal);
+            border-color: rgba(20, 184, 166, 0.3);
+        }
+
+        .badge-aec {
+            background: rgba(56, 189, 248, 0.12);
+            color: var(--blue);
+            border-color: rgba(56, 189, 248, 0.3);
+        }
+
+        .badge-status {
+            background: rgba(148, 163, 184, 0.12);
+            color: var(--text-muted);
+            border-color: var(--border-dim);
+        }
+
+        .badge-status.connected {
+            background: rgba(16, 185, 129, 0.15);
+            color: var(--green);
+            border-color: rgba(16, 185, 129, 0.3);
+        }
+
+        .status-dot {
+            width: 7px;
+            height: 7px;
             border-radius: 50%;
-            border: none;
-            background: linear-gradient(135deg, #22c55e, #16a34a);
-            color: white;
-            font-size: 1.2rem;
-            font-weight: bold;
-            cursor: pointer;
-            box-shadow: 0 10px 25px rgba(34, 197, 94, 0.4);
-            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            background: currentColor;
+        }
+
+        .status-dot.pulse {
+            animation: pulse-ring 2s infinite;
+        }
+
+        @keyframes pulse-ring {
+            0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); }
+            70% { transform: scale(1); box-shadow: 0 0 0 6px rgba(16, 185, 129, 0); }
+            100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+        }
+
+        /* Main Workspace Layout */
+        .workspace {
+            display: grid;
+            grid-template-columns: 340px 1fr 380px;
+            gap: 1.5rem;
+            padding: 1.5rem;
+            flex: 1;
+            height: calc(100vh - 69px);
+            overflow: hidden;
+        }
+
+        @media (max-width: 1180px) {
+            .workspace {
+                grid-template-columns: 1fr;
+                height: auto;
+                overflow: visible;
+            }
+        }
+
+        .card {
+            background: var(--bg-surface);
+            border: 1px solid var(--border-dim);
+            border-radius: 14px;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            box-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.5);
+        }
+
+        .card-header {
+            padding: 1rem 1.25rem;
+            border-bottom: 1px solid var(--border-dim);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            font-weight: 600;
+            font-size: 0.9rem;
+            color: #e2e8f0;
+        }
+
+        .card-body {
+            padding: 1.25rem;
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow-y: auto;
+        }
+
+        /* Left Panel: Telephony Control & Visualizer */
+        .telephony-controls {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 1.5rem;
+            flex: 1;
+        }
+
+        .call-action-wrapper {
+            position: relative;
             display: flex;
             align-items: center;
             justify-content: center;
         }
 
+        .call-btn {
+            width: 130px;
+            height: 130px;
+            border-radius: 50%;
+            border: none;
+            background: linear-gradient(135deg, #10b981, #059669);
+            color: white;
+            font-size: 1.25rem;
+            font-weight: 700;
+            letter-spacing: 0.05em;
+            cursor: pointer;
+            box-shadow: 0 12px 30px rgba(16, 185, 129, 0.4);
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 0.3rem;
+            z-index: 2;
+        }
+
         .call-btn:hover {
-            transform: scale(1.05);
-            box-shadow: 0 15px 35px rgba(34, 197, 94, 0.5);
+            transform: scale(1.04);
+            box-shadow: 0 16px 40px rgba(16, 185, 129, 0.55);
         }
 
         .call-btn:active {
-            transform: scale(0.95);
+            transform: scale(0.96);
         }
 
         .call-btn.active {
-            background: linear-gradient(135deg, #ef4444, #dc2626);
-            box-shadow: 0 10px 25px rgba(239, 68, 68, 0.4);
-            animation: pulse 2s infinite;
+            background: linear-gradient(135deg, #f43f5e, #e11d48);
+            box-shadow: 0 12px 30px var(--rose-glow);
+            animation: active-pulse 2s infinite;
         }
 
-        @keyframes pulse {
-            0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); }
-            70% { box-shadow: 0 0 0 20px rgba(239, 68, 68, 0); }
-            100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+        @keyframes active-pulse {
+            0% { box-shadow: 0 0 0 0 rgba(244, 63, 94, 0.5); }
+            70% { box-shadow: 0 0 0 24px rgba(244, 63, 94, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(244, 63, 94, 0); }
         }
 
-        /* Particles for AI speaking */
-        .visualizer {
+        .call-btn-subtitle {
+            font-size: 0.65rem;
+            font-weight: 500;
+            opacity: 0.85;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+        }
+
+        .call-status-label {
+            font-size: 0.9rem;
+            color: var(--text-muted);
+            text-align: center;
+            min-height: 1.4rem;
+        }
+
+        /* Visualizer Canvas */
+        .visualizer-container {
+            width: 100%;
+            height: 100px;
+            background: #090d16;
+            border-radius: 10px;
+            border: 1px solid var(--border-dim);
+            overflow: hidden;
+            position: relative;
+        }
+
+        canvas#audioCanvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+
+        /* Interruption Indicator Banner */
+        .bargein-banner {
+            width: 100%;
+            padding: 0.75rem 1rem;
+            border-radius: 8px;
+            background: rgba(245, 158, 11, 0.12);
+            border: 1px solid rgba(245, 158, 11, 0.35);
             display: flex;
-            gap: 4px;
-            height: 40px;
             align-items: center;
+            justify-content: space-between;
+            color: var(--amber);
+            font-size: 0.85rem;
+            font-weight: 600;
             opacity: 0;
-            transition: opacity 0.3s;
+            transform: translateY(-8px);
+            transition: all 0.25s ease;
         }
-        
-        .visualizer.active {
+
+        .bargein-banner.active {
             opacity: 1;
+            transform: translateY(0);
+            box-shadow: 0 0 20px var(--amber-glow);
+            animation: banner-flash 0.8s ease;
         }
 
-        .bar {
-            width: 6px;
+        @keyframes banner-flash {
+            0% { background: rgba(245, 158, 11, 0.35); }
+            100% { background: rgba(245, 158, 11, 0.12); }
+        }
+
+        .bargein-count {
+            background: var(--amber);
+            color: #000;
+            font-size: 0.75rem;
+            font-family: var(--font-mono);
+            padding: 0.15rem 0.45rem;
+            border-radius: 4px;
+        }
+
+        /* Manual Input Box */
+        .text-input-box {
+            display: flex;
+            gap: 0.5rem;
+            width: 100%;
+            margin-top: auto;
+        }
+
+        .text-input-box input {
+            flex: 1;
+            background: var(--bg-elevated);
+            border: 1px solid var(--border-dim);
+            border-radius: 8px;
+            padding: 0.6rem 0.8rem;
+            color: #fff;
+            font-family: var(--font-sans);
+            font-size: 0.85rem;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+
+        .text-input-box input:focus {
+            border-color: var(--teal);
+        }
+
+        .text-input-box button {
+            background: var(--bg-elevated);
+            border: 1px solid var(--border-dim);
+            color: var(--text-main);
+            padding: 0.6rem 1rem;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 0.85rem;
+            transition: all 0.2s;
+        }
+
+        .text-input-box button:hover {
+            background: var(--teal);
+            border-color: var(--teal);
+            color: #000;
+        }
+
+        /* Center Panel: Live Transcript */
+        .transcript-feed {
+            flex: 1;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+            padding-right: 0.5rem;
+        }
+
+        .message-bubble {
+            display: flex;
+            flex-direction: column;
+            gap: 0.35rem;
+            max-width: 85%;
+            animation: fadeIn 0.2s ease-out;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(6px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .message-bubble.caller {
+            align-self: flex-start;
+        }
+
+        .message-bubble.agent {
+            align-self: flex-end;
+        }
+
+        .bubble-meta {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.72rem;
+            color: var(--text-muted);
+            font-family: var(--font-mono);
+        }
+
+        .bubble-content {
+            padding: 0.85rem 1.1rem;
+            border-radius: 12px;
+            font-size: 0.92rem;
+            line-height: 1.5;
+            position: relative;
+        }
+
+        .message-bubble.caller .bubble-content {
+            background: #1e293b;
+            color: #f1f5f9;
+            border-bottom-left-radius: 2px;
+            border: 1px solid var(--border-dim);
+        }
+
+        .message-bubble.agent .bubble-content {
+            background: #0f2338;
+            color: #e2e8f0;
+            border-bottom-right-radius: 2px;
+            border: 1px solid #1e3a5f;
+        }
+
+        /* Filler Word Highlighting */
+        .filler-highlight {
+            display: inline-block;
+            background: linear-gradient(135deg, rgba(168, 85, 247, 0.25), rgba(245, 158, 11, 0.25));
+            border: 1px solid rgba(168, 85, 247, 0.5);
+            color: #fcd34d;
+            padding: 0.15rem 0.5rem;
+            border-radius: 6px;
+            font-weight: 600;
+            font-size: 0.88rem;
+            box-shadow: 0 0 10px rgba(168, 85, 247, 0.2);
+            animation: pulse-filler 1.5s ease-in-out;
+        }
+
+        @keyframes pulse-filler {
+            0% { transform: scale(0.98); }
+            50% { transform: scale(1.02); }
+            100% { transform: scale(1); }
+        }
+
+        .stance-tag {
+            font-size: 0.65rem;
+            font-family: var(--font-mono);
+            text-transform: uppercase;
+            padding: 0.15rem 0.4rem;
+            border-radius: 4px;
+            background: rgba(168, 85, 247, 0.2);
+            color: var(--purple);
+            border: 1px solid rgba(168, 85, 247, 0.4);
+        }
+
+        /* Right Panel: Latency Waterfall */
+        .waterfall-metrics {
+            display: flex;
+            flex-direction: column;
+            gap: 1.25rem;
+        }
+
+        .metric-tile {
+            background: var(--bg-elevated);
+            border: 1px solid var(--border-dim);
+            border-radius: 10px;
+            padding: 1rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.4rem;
+        }
+
+        .metric-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .metric-name {
+            font-size: 0.8rem;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .metric-value {
+            font-family: var(--font-mono);
+            font-size: 1.45rem;
+            font-weight: 700;
+            color: #fff;
+        }
+
+        .metric-value.filler { color: var(--amber); }
+        .metric-value.ttft { color: var(--blue); }
+        .metric-value.ttfa { color: var(--teal); }
+        .metric-value.total { color: var(--green); }
+
+        /* Waterfall Visual Bar Breakdown */
+        .waterfall-bar-card {
+            background: var(--bg-elevated);
+            border: 1px solid var(--border-dim);
+            border-radius: 10px;
+            padding: 1rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.8rem;
+        }
+
+        .waterfall-progress {
+            height: 18px;
+            background: #090d16;
+            border-radius: 6px;
+            overflow: hidden;
+            display: flex;
+            border: 1px solid var(--border-dim);
+        }
+
+        .stage-filler {
+            background: linear-gradient(90deg, #d97706, #f59e0b);
+            height: 100%;
+            transition: width 0.4s ease;
+        }
+
+        .stage-ttft {
+            background: linear-gradient(90deg, #0284c7, #38bdf8);
+            height: 100%;
+            transition: width 0.4s ease;
+        }
+
+        .stage-ttfa {
+            background: linear-gradient(90deg, #0d9488, #14b8a6);
+            height: 100%;
+            transition: width 0.4s ease;
+        }
+
+        .waterfall-legend {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 0.5rem;
+            font-size: 0.72rem;
+            font-family: var(--font-mono);
+            color: var(--text-muted);
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+        }
+
+        .legend-dot {
+            width: 8px;
             height: 8px;
-            background: #38bdf8;
-            border-radius: 3px;
-            animation: bounce 0.5s ease-in-out infinite alternate;
+            border-radius: 2px;
         }
 
-        .bar:nth-child(2) { animation-delay: 0.1s; }
-        .bar:nth-child(3) { animation-delay: 0.2s; }
-        .bar:nth-child(4) { animation-delay: 0.3s; }
-        .bar:nth-child(5) { animation-delay: 0.4s; }
+        /* Echo Cancellation Monitor */
+        .aec-monitor {
+            margin-top: auto;
+            background: #090d16;
+            border: 1px solid var(--border-dim);
+            border-radius: 10px;
+            padding: 0.85rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+            font-size: 0.78rem;
+            font-family: var(--font-mono);
+        }
 
-        @keyframes bounce {
-            from { height: 8px; }
-            to { height: 40px; }
+        .aec-row {
+            display: flex;
+            justify-content: space-between;
+            color: var(--text-muted);
+        }
+
+        .aec-val {
+            color: #e2e8f0;
+            font-weight: 600;
         }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1>AI Voice Agent</h1>
-        
-        <div class="visualizer" id="visualizer">
-            <div class="bar"></div>
-            <div class="bar"></div>
-            <div class="bar"></div>
-            <div class="bar"></div>
-            <div class="bar"></div>
+    <header>
+        <div class="brand">
+            <div class="brand-icon">⚡</div>
+            <div>
+                <div class="brand-title">Voice AI Telephony Gateway</div>
+            </div>
+        </div>
+        <div class="header-badges">
+            <div class="badge badge-duplex">
+                <span class="status-dot"></span> Full-Duplex Active
+            </div>
+            <div class="badge badge-aec">
+                Echo Reference Tap Online (60ms Delay Alignment)
+            </div>
+            <div class="badge badge-status" id="connectionBadge">
+                <span class="status-dot" id="statusDot"></span>
+                <span id="connectionText">Disconnected</span>
+            </div>
+        </div>
+    </header>
+
+    <div class="workspace">
+        <!-- Panel 1: Telephony Controls & Audio Waveform -->
+        <div class="card">
+            <div class="card-header">
+                <span>Telephony Bridge Control</span>
+                <span style="font-size: 0.75rem; color: var(--text-muted);">16kHz PCM</span>
+            </div>
+            <div class="card-body">
+                <div class="telephony-controls">
+                    <!-- Barge-in Alert Banner -->
+                    <div class="bargein-banner" id="bargeinBanner">
+                        <span>⚡ Barge-In Detected (&lt;50ms Cutoff)</span>
+                        <span class="bargein-count" id="bargeinCounter">0 cutoffs</span>
+                    </div>
+
+                    <div class="call-action-wrapper">
+                        <button class="call-btn" id="callBtn">
+                            <span id="callBtnText">CALL</span>
+                            <span class="call-btn-subtitle" id="callBtnSub">TAP TO CONNECT</span>
+                        </button>
+                    </div>
+
+                    <div class="call-status-label" id="statusLabel">Ready to connect voice bridge</div>
+
+                    <!-- Real-Time Audio Waveform Visualizer -->
+                    <div class="visualizer-container">
+                        <canvas id="audioCanvas"></canvas>
+                    </div>
+                </div>
+
+                <!-- Simulation Input Box -->
+                <div class="text-input-box">
+                    <input type="text" id="promptInput" placeholder="Simulate speech query..." />
+                    <button id="sendPromptBtn">Send</button>
+                </div>
+            </div>
         </div>
 
-        <button class="call-btn" id="callBtn">CALL</button>
-        <div class="status" id="status">Tap to call</div>
+        <!-- Panel 2: Live Conversation Transcript with Filler Highlights -->
+        <div class="card">
+            <div class="card-header">
+                <span>Live Full-Duplex Transcript</span>
+                <span style="font-size: 0.75rem; color: var(--teal);" id="stanceIndicator">Stance: Ready</span>
+            </div>
+            <div class="card-body">
+                <div class="transcript-feed" id="transcriptFeed">
+                    <div class="message-bubble agent">
+                        <div class="bubble-meta"><span>Agent</span> • <span>System</span></div>
+                        <div class="bubble-content">
+                            Voice stream initialized. Click CALL and speak, or send a query below. Caller can interrupt anytime without audio drops.
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Panel 3: Real-Time Latency Waterfall Metrics -->
+        <div class="card">
+            <div class="card-header">
+                <span>Latency Waterfall</span>
+                <span style="font-size: 0.75rem; color: var(--text-muted);">Real-Time Monotonic</span>
+            </div>
+            <div class="card-body">
+                <div class="waterfall-metrics">
+                    <div class="metric-tile">
+                        <div class="metric-header">
+                            <span class="metric-name">Time to Filler</span>
+                            <span class="badge" style="background: rgba(245, 158, 11, 0.15); color: var(--amber);">Fast-Path Reflex</span>
+                        </div>
+                        <div class="metric-value filler" id="valTimeToFiller">-- ms</div>
+                    </div>
+
+                    <div class="metric-tile">
+                        <div class="metric-header">
+                            <span class="metric-name">Time to First Token (TTFT)</span>
+                            <span class="badge" style="background: rgba(56, 189, 248, 0.15); color: var(--blue);">Deep-Path LLM</span>
+                        </div>
+                        <div class="metric-value ttft" id="valTtft">-- ms</div>
+                    </div>
+
+                    <div class="metric-tile">
+                        <div class="metric-header">
+                            <span class="metric-name">Time to First Speech (TTFA)</span>
+                            <span class="badge" style="background: rgba(20, 184, 166, 0.15); color: var(--teal);">Kokoro Sub-50ms</span>
+                        </div>
+                        <div class="metric-value ttfa" id="valTtfa">-- ms</div>
+                    </div>
+
+                    <div class="metric-tile">
+                        <div class="metric-header">
+                            <span class="metric-name">Total Turnaround</span>
+                            <span class="badge" style="background: rgba(16, 185, 129, 0.15); color: var(--green);">Full Roundtrip</span>
+                        </div>
+                        <div class="metric-value total" id="valTotalTurnaround">-- ms</div>
+                    </div>
+
+                    <!-- Visual Waterfall Breakdown Bar -->
+                    <div class="waterfall-bar-card">
+                        <div style="font-size: 0.75rem; color: var(--text-muted); font-weight: 600;">STAGE TIMING WATERFALL</div>
+                        <div class="waterfall-progress">
+                            <div class="stage-filler" id="barFiller" style="width: 0%;"></div>
+                            <div class="stage-ttft" id="barTtft" style="width: 0%;"></div>
+                            <div class="stage-ttfa" id="barTtfa" style="width: 0%;"></div>
+                        </div>
+                        <div class="waterfall-legend">
+                            <div class="legend-item"><span class="legend-dot" style="background: var(--amber);"></span> Filler Playback</div>
+                            <div class="legend-item"><span class="legend-dot" style="background: var(--blue);"></span> LLM First Token</div>
+                            <div class="legend-item"><span class="legend-dot" style="background: var(--teal);"></span> TTS Audio Frame</div>
+                            <div class="legend-item"><span class="legend-dot" style="background: var(--green);"></span> Total Turnaround</div>
+                        </div>
+                    </div>
+
+                    <!-- Echo Reference Tap Status -->
+                    <div class="aec-monitor">
+                        <div class="aec-row"><span>Echo Alignment Delay:</span><span class="aec-val">65.0 ms</span></div>
+                        <div class="aec-row"><span>Correlation Window:</span><span class="aec-val">40ms - 120ms</span></div>
+                        <div class="aec-row"><span>Backchannel Cutoff:</span><span class="aec-val">&lt; 350 ms</span></div>
+                        <div class="aec-row"><span>Barge-in Threshold:</span><span class="aec-val">&gt; 300 ms continuous</span></div>
+                    </div>
+                </div>
+            </div>
+        </div>
     </div>
 
     <script>
         let ws = null;
         let audioContext = null;
-        let mediaStream = null;
-        let processor = null;
-        
-        const callBtn = document.getElementById('callBtn');
-        const statusEl = document.getElementById('status');
-        const visualizer = document.getElementById('visualizer');
+        let micStream = null;
+        let scriptProcessor = null;
+        let micAnalyser = null;
+        let isConnected = false;
+        let bargeInCount = 0;
+        let scheduledAudioSources = [];
 
-        // Target sample rate for the backend (Whisper/VAD expects 16kHz)
         const TARGET_SAMPLE_RATE = 16000;
 
+        // UI elements
+        const callBtn = document.getElementById('callBtn');
+        const callBtnText = document.getElementById('callBtnText');
+        const callBtnSub = document.getElementById('callBtnSub');
+        const statusLabel = document.getElementById('statusLabel');
+        const connectionBadge = document.getElementById('connectionBadge');
+        const statusDot = document.getElementById('statusDot');
+        const connectionText = document.getElementById('connectionText');
+        const bargeinBanner = document.getElementById('bargeinBanner');
+        const bargeinCounter = document.getElementById('bargeinCounter');
+        const transcriptFeed = document.getElementById('transcriptFeed');
+        const stanceIndicator = document.getElementById('stanceIndicator');
+
+        // Waterfall metric elements
+        const valTimeToFiller = document.getElementById('valTimeToFiller');
+        const valTtft = document.getElementById('valTtft');
+        const valTtfa = document.getElementById('valTtfa');
+        const valTotalTurnaround = document.getElementById('valTotalTurnaround');
+        const barFiller = document.getElementById('barFiller');
+        const barTtft = document.getElementById('barTtft');
+        const barTtfa = document.getElementById('barTtfa');
+
+        // Canvas Visualizer
+        const canvas = document.getElementById('audioCanvas');
+        const canvasCtx = canvas.getContext('2d');
+
+        function resizeCanvas() {
+            canvas.width = canvas.parentElement.clientWidth * window.devicePixelRatio;
+            canvas.height = canvas.parentElement.clientHeight * window.devicePixelRatio;
+        }
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        let visualizerData = new Uint8Array(64);
+        function drawVisualizer() {
+            requestAnimationFrame(drawVisualizer);
+            const w = canvas.width;
+            const h = canvas.height;
+            canvasCtx.clearRect(0, 0, w, h);
+
+            if (micAnalyser && isConnected) {
+                micAnalyser.getByteFrequencyData(visualizerData);
+            } else {
+                for (let i = 0; i < visualizerData.length; i++) {
+                    visualizerData[i] = Math.max(0, visualizerData[i] - 4);
+                }
+            }
+
+            const barWidth = (w / visualizerData.length) * 1.5;
+            let x = 0;
+            for (let i = 0; i < visualizerData.length; i++) {
+                const barHeight = (visualizerData[i] / 255.0) * h * 0.85;
+                const gradient = canvasCtx.createLinearGradient(0, h - barHeight, 0, h);
+                gradient.addColorStop(0, '#38bdf8');
+                gradient.addColorStop(1, '#14b8a6');
+                canvasCtx.fillStyle = gradient;
+                canvasCtx.fillRect(x, h - barHeight, barWidth - 2, barHeight);
+                x += barWidth;
+            }
+        }
+        drawVisualizer();
+
+        // Start Call
         async function startCall() {
             try {
-                statusEl.innerText = "Requesting microphone...";
-                mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-                
-                audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: TARGET_SAMPLE_RATE });
-                
-                // Construct WebSocket URL dynamically based on current host
+                statusLabel.innerText = "Requesting microphone permissions...";
+                micStream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        echoCancellation: false, // Let server Echo Reference Tap handle acoustic echo!
+                        noiseSuppression: false,
+                        autoGainControl: false,
+                        channelCount: 1,
+                        sampleRate: TARGET_SAMPLE_RATE
+                    },
+                    video: false
+                });
+
+                audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                    sampleRate: TARGET_SAMPLE_RATE
+                });
+
                 const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
                 const wsUrl = `${protocol}//${window.location.host}/web_stream`;
-                
-                statusEl.innerText = "Connecting...";
+
+                statusLabel.innerText = "Connecting full-duplex WebSocket...";
                 ws = new WebSocket(wsUrl);
                 ws.binaryType = "arraybuffer";
 
                 ws.onopen = () => {
-                    statusEl.innerText = "Connected! Start talking.";
-                    callBtn.innerText = "END";
+                    isConnected = true;
+                    statusLabel.innerText = "Call connected! Full-duplex active.";
+                    callBtnText.innerText = "END";
+                    callBtnSub.innerText = "HANG UP";
                     callBtn.classList.add('active');
-                    
-                    // Capture Mic
-                    const source = audioContext.createMediaStreamSource(mediaStream);
-                    // Use ScriptProcessor (deprecated but works reliably everywhere without separate files)
-                    processor = audioContext.createScriptProcessor(4096, 1, 1);
-                    
-                    source.connect(processor);
-                    processor.connect(audioContext.destination);
-                    
-                    processor.onaudioprocess = (e) => {
-                        if (ws.readyState === WebSocket.OPEN) {
+
+                    connectionBadge.classList.add('connected');
+                    statusDot.classList.add('pulse');
+                    connectionText.innerText = "Connected (16kHz)";
+
+                    // Setup Mic capture
+                    const source = audioContext.createMediaStreamSource(micStream);
+                    micAnalyser = audioContext.createAnalyser();
+                    micAnalyser.fftSize = 128;
+                    source.connect(micAnalyser);
+
+                    scriptProcessor = audioContext.createScriptProcessor(2048, 1, 1);
+                    source.connect(scriptProcessor);
+                    scriptProcessor.connect(audioContext.destination);
+
+                    scriptProcessor.onaudioprocess = (e) => {
+                        if (ws && ws.readyState === WebSocket.OPEN) {
                             const float32Data = e.inputBuffer.getChannelData(0);
-                            // Convert float32 to int16 for the backend
                             const int16Data = new Int16Array(float32Data.length);
                             for (let i = 0; i < float32Data.length; i++) {
-                                int16Data[i] = Math.max(-32768, Math.min(32767, float32Data[i] * 32768));
+                                int16Data[i] = Math.max(-32768, Math.min(32767, float32Data[i] * 32767));
                             }
                             ws.send(int16Data.buffer);
                         }
@@ -185,75 +868,194 @@
 
                 ws.onmessage = async (event) => {
                     if (typeof event.data === "string") {
-                        const msg = JSON.parse(event.data);
-                        if (msg.event === "tts_start") {
-                            visualizer.classList.add('active');
-                        } else if (msg.event === "tts_stop") {
-                            visualizer.classList.remove('active');
-                        }
+                        handleJsonMessage(JSON.parse(event.data));
                         return;
                     }
 
-                    // Received binary audio from server (Int16 PCM at 24000Hz)
-                    const int16Array = new Int16Array(event.data);
-                    const float32Array = new Float32Array(int16Array.length);
-                    for (let i = 0; i < int16Array.length; i++) {
-                        float32Array[i] = int16Array[i] / 32768.0;
-                    }
-
-                    // The server sends 24000Hz audio. 
-                    // We create a buffer and play it.
-                    const buffer = audioContext.createBuffer(1, float32Array.length, 24000);
-                    buffer.copyToChannel(float32Array, 0);
-
-                    const source = audioContext.createBufferSource();
-                    source.buffer = buffer;
-                    source.connect(audioContext.destination);
-                    source.start();
+                    // Received binary PCM audio from server (16kHz Int16)
+                    handleBinaryAudio(event.data);
                 };
 
-                ws.onclose = () => {
-                    endCall();
-                };
-
-                ws.onerror = (e) => {
-                    console.error(e);
-                    statusEl.innerText = "Connection error.";
+                ws.onclose = () => { endCall(); };
+                ws.onerror = (err) => {
+                    console.error("WebSocket error:", err);
                     endCall();
                 };
 
             } catch (err) {
-                console.error(err);
-                statusEl.innerText = "Microphone access denied or error.";
+                console.error("Mic access error:", err);
+                statusLabel.innerText = "Microphone access denied or error.";
             }
         }
 
-        function endCall() {
-            if (processor) {
-                processor.disconnect();
-                processor = null;
+        // Handle JSON control & metadata messages
+        function handleJsonMessage(msg) {
+            if (msg.event === "barge_in") {
+                // Immediate audio cutoff on client!
+                stopAllScheduledAudio();
+                bargeInCount++;
+                bargeinCounter.innerText = `${bargeInCount} cutoffs`;
+                bargeinBanner.classList.add('active');
+                setTimeout(() => bargeinBanner.classList.remove('active'), 2500);
+                statusLabel.innerText = "⚡ Barge-in detected! Interrupted agent.";
             }
-            if (mediaStream) {
-                mediaStream.getTracks().forEach(t => t.stop());
-                mediaStream = null;
+            else if (msg.event === "classification") {
+                stanceIndicator.innerText = `Stance: ${msg.stance.toUpperCase()} (${msg.latency_ms.toFixed(1)}ms)`;
+            }
+            else if (msg.event === "filler_start") {
+                valTimeToFiller.innerText = `${msg.time_to_filler_ms} ms`;
+            }
+            else if (msg.event === "transcript") {
+                appendTranscriptMessage(msg.role, msg.text, msg.is_filler, msg.stance);
+            }
+            else if (msg.event === "metrics") {
+                updateWaterfallMetrics(msg);
+            }
+        }
+
+        // Play scheduled binary audio chunks
+        let nextPlayTime = 0;
+        function handleBinaryAudio(arrayBuffer) {
+            if (!audioContext || audioContext.state === 'closed') return;
+
+            const int16Array = new Int16Array(arrayBuffer);
+            const float32Array = new Float32Array(int16Array.length);
+            for (let i = 0; i < int16Array.length; i++) {
+                float32Array[i] = int16Array[i] / 32768.0;
+            }
+
+            const buffer = audioContext.createBuffer(1, float32Array.length, TARGET_SAMPLE_RATE);
+            buffer.copyToChannel(float32Array, 0);
+
+            const source = audioContext.createBufferSource();
+            source.buffer = buffer;
+            source.connect(audioContext.destination);
+
+            const now = audioContext.currentTime;
+            if (nextPlayTime < now) {
+                nextPlayTime = now + 0.02;
+            }
+
+            source.start(nextPlayTime);
+            nextPlayTime += buffer.duration;
+
+            scheduledAudioSources.push(source);
+            source.onended = () => {
+                const idx = scheduledAudioSources.indexOf(source);
+                if (idx !== -1) scheduledAudioSources.splice(idx, 1);
+            };
+        }
+
+        function stopAllScheduledAudio() {
+            scheduledAudioSources.forEach(src => {
+                try { src.stop(); src.disconnect(); } catch (e) {}
+            });
+            scheduledAudioSources = [];
+            if (audioContext) {
+                nextPlayTime = audioContext.currentTime;
+            }
+        }
+
+        function appendTranscriptMessage(role, text, isFiller = false, stance = null) {
+            const bubble = document.createElement('div');
+            bubble.className = `message-bubble ${role}`;
+
+            const meta = document.createElement('div');
+            meta.className = 'bubble-meta';
+            const roleName = role === 'caller' ? 'Caller' : 'Agent';
+            meta.innerHTML = `<span>${roleName}</span>`;
+            if (stance) {
+                meta.innerHTML += ` • <span class="stance-tag">${stance}</span>`;
+            }
+
+            const content = document.createElement('div');
+            content.className = 'bubble-content';
+
+            if (isFiller) {
+                content.innerHTML = `<span class="filler-highlight">⚡ ${text}</span>`;
+            } else {
+                content.innerText = text;
+            }
+
+            bubble.appendChild(meta);
+            bubble.appendChild(content);
+            transcriptFeed.appendChild(bubble);
+            transcriptFeed.scrollTop = transcriptFeed.scrollHeight;
+        }
+
+        function updateWaterfallMetrics(m) {
+            valTimeToFiller.innerText = m.time_to_filler_ms > 0 ? `${m.time_to_filler_ms} ms` : 'N/A';
+            valTtft.innerText = m.ttft_ms > 0 ? `${m.ttft_ms} ms` : '-- ms';
+            valTtfa.innerText = m.ttfa_ms > 0 ? `${m.ttfa_ms} ms` : '-- ms';
+            valTotalTurnaround.innerText = `${m.total_turnaround_ms} ms`;
+
+            const total = Math.max(m.total_turnaround_ms, 100);
+            const pFiller = m.time_to_filler_ms > 0 ? (m.time_to_filler_ms / total) * 100 : 0;
+            const pTtft = m.ttft_ms > 0 ? Math.max(0, ((m.ttft_ms - (m.time_to_filler_ms || 0)) / total) * 100) : 0;
+            const pTtfa = m.ttfa_ms > 0 ? Math.max(0, ((m.ttfa_ms - (m.ttft_ms || 0)) / total) * 100) : 0;
+
+            barFiller.style.width = `${pFiller}%`;
+            barTtft.style.width = `${pTtft}%`;
+            barTtfa.style.width = `${pTtfa}%`;
+        }
+
+        function endCall() {
+            isConnected = false;
+            stopAllScheduledAudio();
+
+            if (scriptProcessor) {
+                scriptProcessor.disconnect();
+                scriptProcessor = null;
+            }
+            if (micStream) {
+                micStream.getTracks().forEach(t => t.stop());
+                micStream = null;
+            }
+            if (audioContext && audioContext.state !== 'closed') {
+                audioContext.close();
+                audioContext = null;
             }
             if (ws) {
                 ws.close();
                 ws = null;
             }
-            
-            callBtn.innerText = "CALL";
+
+            callBtnText.innerText = "CALL";
+            callBtnSub.innerText = "TAP TO CONNECT";
             callBtn.classList.remove('active');
-            visualizer.classList.remove('active');
-            statusEl.innerText = "Call ended. Tap to call again.";
+            connectionBadge.classList.remove('connected');
+            statusDot.classList.remove('pulse');
+            connectionText.innerText = "Disconnected";
+            statusLabel.innerText = "Call ended. Tap CALL to reconnect.";
         }
 
         callBtn.addEventListener('click', () => {
-            if (ws && ws.readyState === WebSocket.OPEN) {
+            if (isConnected) {
                 endCall();
             } else {
                 startCall();
             }
+        });
+
+        // Prompt Input Simulation
+        const promptInput = document.getElementById('promptInput');
+        const sendPromptBtn = document.getElementById('sendPromptBtn');
+
+        function sendPrompt() {
+            const query = promptInput.value.trim();
+            if (!query) return;
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ event: "text_prompt", text: query }));
+                appendTranscriptMessage("caller", query);
+                promptInput.value = "";
+            } else {
+                statusLabel.innerText = "Connect call first to send query!";
+            }
+        }
+
+        sendPromptBtn.addEventListener('click', sendPrompt);
+        promptInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') sendPrompt();
         });
     </script>
 </body>

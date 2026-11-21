@@ -8,6 +8,8 @@ __pycache__/
 *.onnx
 *.bin
 *.pt
+*.npz
+cache/
 
 # IDEs
 .vscode/
