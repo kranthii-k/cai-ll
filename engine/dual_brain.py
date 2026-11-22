@@ -105,18 +105,41 @@ class DualBrainEngine:
     def __init__(
         self,
         client: Optional[AsyncOpenAI] = None,
-        model: str = "qwen2.5:0.5b",
-        base_url: str = "http://localhost:11434/v1",
-        api_key: str = "not-needed",
+        model: Optional[str] = None,
+        base_url: Optional[str] = None,
+        api_key: Optional[str] = None,
         system_prompt: Optional[str] = None,
         filler_manager: Optional[FillerManager] = None,
         fast_classifier: Optional[FastClassifier] = None,
     ):
-        self.client = client or AsyncOpenAI(
-            base_url=os.getenv("OPENAI_BASE_URL", base_url),
-            api_key=os.getenv("OPENAI_API_KEY", api_key),
-        )
-        self.model = model
+        groq_key = os.getenv("GROQ_API_KEY")
+        openai_key = os.getenv("OPENAI_API_KEY")
+
+        if client:
+            self.client = client
+            self.model = model or os.getenv("LLM_MODEL", "qwen2.5:0.5b")
+        elif groq_key:
+            # Ultra-low latency cloud LPU provider (Groq: ~100ms TTFT)
+            self.client = AsyncOpenAI(
+                base_url=os.getenv("OPENAI_BASE_URL", "https://api.groq.com/openai/v1"),
+                api_key=groq_key,
+            )
+            self.model = model or os.getenv("LLM_MODEL", "llama-3.3-70b-versatile")
+        elif openai_key and openai_key != "not-needed":
+            # Cloud OpenAI provider
+            self.client = AsyncOpenAI(
+                base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+                api_key=openai_key,
+            )
+            self.model = model or os.getenv("LLM_MODEL", "gpt-4o-mini")
+        else:
+            # Local Ollama / vLLM provider
+            self.client = AsyncOpenAI(
+                base_url=os.getenv("OPENAI_BASE_URL", base_url or "http://localhost:11434/v1"),
+                api_key=api_key or "not-needed",
+            )
+            self.model = model or os.getenv("LLM_MODEL", "qwen2.5:0.5b")
+
         self.system_prompt = system_prompt or (
             "You are an ultra-fast, helpful voice AI telephony agent. "
             "Keep spoken responses concise, direct, and conversational. "
@@ -322,12 +345,25 @@ class DualBrainEngine:
 
             response = await self.client.chat.completions.create(**kwargs)
         except Exception as e:
-            logger.error(f"Error calling LLM: {e}", exc_info=True)
-            yield DualBrainEvent(
-                type=DualBrainEventType.ERROR,
-                text=str(e),
-                metadata={"error": str(e)}
-            )
+            logger.error(f"Error calling LLM: {e}")
+            err_str = str(e).lower()
+            if any(term in err_str for term in ["connection", "connect", "11434", "refused", "offline"]):
+                fallback_text = (
+                    "I can hear you loud and clear. My acoustic filler reflex, equal-power crossfader, "
+                    "and full-duplex audio stream are working, but the LLM server is currently offline. "
+                    "Please start Ollama or set an API key to enable full conversational intelligence."
+                )
+                yield DualBrainEvent(
+                    type=DualBrainEventType.SENTENCE,
+                    text=fallback_text,
+                    metadata={"fallback": True, "error": str(e)}
+                )
+            else:
+                yield DualBrainEvent(
+                    type=DualBrainEventType.ERROR,
+                    text=str(e),
+                    metadata={"error": str(e)}
+                )
             return
 
         text_buffer = ""
