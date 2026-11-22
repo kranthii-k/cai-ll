@@ -95,7 +95,7 @@ SAMPLE_RATE_VAD = 16000
 SAMPLE_RATE_KOKORO = 24000
 TWILIO_FRAME_SIZE = 160  # 20ms at 8kHz mu-law
 VAD_CHUNK_SAMPLES = 512  # 32ms at 16kHz
-VAD_SPEECH_THRESHOLD = 0.25
+VAD_SPEECH_THRESHOLD = 0.45
 
 # Dynamic Turn-Taking & Endpointing Constants
 DEFAULT_SILENCE_TIMEOUT_MS = 480.0  # 450ms-500ms default prevents chopping human speech mid-sentence
@@ -569,39 +569,16 @@ async def transcribe_speech(speech_data: np.ndarray) -> str:
             logger.debug(f"Local Whisper race notice: {e}")
             return None
 
-    # Both engines available: speculative race!
-    if registry.groq_stt_client is not None and registry.whisper is not None:
-        groq_task = asyncio.create_task(_call_groq())
-        local_task = asyncio.create_task(asyncio.to_thread(_call_local))
-
-        done, pending = await asyncio.wait(
-            [groq_task, local_task],
-            return_when=asyncio.FIRST_COMPLETED
-        )
-
-        for d in done:
-            res_text = d.result()
-            if res_text:
-                for p in pending:
-                    p.cancel()
-                return res_text
-
-        # If fastest produced empty string, wait for the pending task
-        for p in pending:
-            try:
-                res_text = await p
-                if res_text:
-                    return res_text
-            except Exception:
-                pass
-        return ""
-
-    # Single-engine fallbacks:
+    # Primary: Cloud Whisper via Groq LPU (~220ms latency, zero CPU load)
     if registry.groq_stt_client is not None:
-        groq_res = await _call_groq()
-        if groq_res:
-            return groq_res
+        try:
+            groq_res = await asyncio.wait_for(_call_groq(), timeout=2.5)
+            if groq_res:
+                return groq_res
+        except Exception as e:
+            logger.warning(f"Groq Cloud STT timed out or failed ({e}); falling back to local Whisper")
 
+    # Fallback: Local Faster-Whisper tiny.en on CPU (only invoked if Groq is unavailable or failed)
     if registry.whisper is not None:
         local_res = await asyncio.to_thread(_call_local)
         if local_res:
@@ -1013,14 +990,6 @@ class CallSession:
         if should_interrupt and self.tts_playing and barge_in_holdoff_ms >= 450.0:
             await self.handle_barge_in()
 
-        # VAD Echo Gate:
-        # If the bot is actively playing outbound speech and caller has NOT barged in,
-        # the inbound microphone audio is residual speakerphone echo!
-        # Attenuate it down to near-zero so Silero VAD doesn't detect the bot's own voice,
-        # transcribe it via Whisper, and cut off the bot's active turn mid-sentence!
-        if self.tts_playing and not should_interrupt:
-            cleaned_pcm = cleaned_pcm * 0.005
-
         # Non-blocking enqueue for VAD processing (preserves caller voice without dropping)
         await self.inbound_audio_queue.put(cleaned_pcm)
 
@@ -1159,28 +1128,7 @@ class CallSession:
                     )
                     continue
 
-                accumulated_text = text
-                # Thought aggregation: ONLY if thought is syntactically incomplete (ends with dangling conjunction/preposition),
-                # wait briefly to stitch consecutive speech chunks into a complete thought
-                if is_incomplete_thought(accumulated_text):
-                    continuation_deadline = time.time() + 0.45
-                    while time.time() < continuation_deadline:
-                        try:
-                            next_speech = await asyncio.wait_for(self.speech_queue.get(), timeout=0.15)
-                            t_next_start = time.time()
-                            next_text = await transcribe_speech(next_speech)
-                            stt_duration_ms += (time.time() - t_next_start) * 1000.0
-                            vad_dur += (len(next_speech) / SAMPLE_RATE_VAD) * 1000.0
-                            if next_text:
-                                accumulated_text = f"{accumulated_text.rstrip(',')} {next_text}".strip()
-                                if not is_incomplete_thought(accumulated_text):
-                                    break
-                                continuation_deadline = time.time() + 0.45
-                        except asyncio.TimeoutError:
-                            if not self.is_user_speaking and not is_incomplete_thought(accumulated_text):
-                                break
-
-                final_text = accumulated_text.strip()
+                final_text = text.strip()
                 self.current_turn_metrics = {
                     "stt_latency_ms": stt_duration_ms,
                     "transcribed_text_length": len(final_text),
@@ -1215,10 +1163,6 @@ class CallSession:
         while self.is_connected:
             try:
                 user_text = await self.text_queue.get()
-                # If caller resumed speaking, wait for caller to finish thought before agent starts
-                while self.is_user_speaking and self.is_connected:
-                    await asyncio.sleep(0.04)
-
                 turn_id = self.active_turn_id
                 start_time = self.turn_start_time or time.time()
 
