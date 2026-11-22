@@ -32,6 +32,7 @@ from .crossfade_buffer import (
     int16_to_float32,
     pcm_to_mulaw_bytes,
     resample_audio,
+    trim_audio_silence,
 )
 
 # Optional Kokoro ONNX import
@@ -85,6 +86,9 @@ class FillerItem:
         samples = self.audio_samples
         if target_sr is not None and target_sr != self.sample_rate:
             samples = resample_audio(samples, self.sample_rate, target_sr)
+
+        # Ensure dead silence zeros are trimmed with smooth breathing envelope
+        samples = trim_audio_silence(samples, threshold=0.005, pad_ms=12.0, sr=target_sr or self.sample_rate)
 
         if dtype is not None and samples.dtype != dtype:
             if dtype == np.int16:
@@ -148,6 +152,11 @@ class FillerManager:
         "clarifying": [
             "Hmm, let's see...",
             "Right, so...",
+        ],
+        "direct": [
+            "Hey there!",
+            "Hi, I'm here!",
+            "Hello, sure thing...",
         ],
     }
 
@@ -224,7 +233,9 @@ class FillerManager:
                 try:
                     data = np.load(cache_file)
                     for key in data.files:
-                        self._audio_cache[key] = data[key].astype(np.float32)
+                        self._audio_cache[key] = trim_audio_silence(
+                            data[key].astype(np.float32), threshold=0.005, pad_ms=12.0, sr=self.sample_rate
+                        )
                     self._is_warmed_up = True
                     self._prepopulate_resampled_cache()
                     return len(self._audio_cache)
@@ -256,6 +267,8 @@ class FillerManager:
                                 speed=1.0,
                                 lang="en-us"
                             )
+                            # Kokoro generates 150-350ms of dead zeros: sanitize with 12ms breathing envelope
+                            samples = trim_audio_silence(samples, threshold=0.005, pad_ms=12.0, sr=sr)
                             # Kokoro output is 24kHz float32
                             if sr != self.sample_rate:
                                 samples = resample_audio(samples, sr, self.sample_rate)

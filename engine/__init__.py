@@ -46,6 +46,7 @@ from .crossfade_buffer import (
     resample_24k_to_16k,
     resample_24k_to_8k,
     resample_8k_to_24k,
+    trim_audio_silence,
 )
 
 __all__ = [
@@ -84,4 +85,5 @@ __all__ = [
     "resample_24k_to_16k",
     "resample_24k_to_8k",
     "resample_8k_to_24k",
+    "trim_audio_silence",
 ]

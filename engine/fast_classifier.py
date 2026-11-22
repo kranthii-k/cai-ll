@@ -41,8 +41,8 @@ STANCE_REGISTRY: Dict[ConversationalStance, StanceMetadata] = {
     ConversationalStance.AFFIRMATIVE: StanceMetadata(
         stance=ConversationalStance.AFFIRMATIVE,
         recommended_filler_key="affirmative",
-        expected_delay_ms=100,
-        latency_masking_required=False,
+        expected_delay_ms=250,
+        latency_masking_required=True,
         description="Acknowledgement, confirmation, or closure acknowledging user input with minimal delay."
     ),
     ConversationalStance.EMPATHETIC: StanceMetadata(
@@ -62,8 +62,8 @@ STANCE_REGISTRY: Dict[ConversationalStance, StanceMetadata] = {
     ConversationalStance.DIRECT: StanceMetadata(
         stance=ConversationalStance.DIRECT,
         recommended_filler_key="direct",
-        expected_delay_ms=0,
-        latency_masking_required=False,
+        expected_delay_ms=300,
+        latency_masking_required=True,
         description="Greetings, one/two-word utterances, or immediate answers requiring zero-lag response."
     ),
 }
@@ -195,13 +195,14 @@ class FastClassifier:
         ]
         self._affirmative_regex = re.compile("|".join(affirmative_phrases), re.IGNORECASE)
 
-        # 5. Direct (greetings, short contact prompts)
-        direct_greetings = [
+        # 5. Direct (greetings, short contact prompts, telephony pause/hold courtesies)
+        direct_phrases = [
             r"^(?:hi|hello|hey|howdy|yo|sup|greetings)(?:\s+(?:there|agent|bot|sir|ma'am))?[\.!\?]*$",
             r"^(?:good\s+(?:morning|afternoon|evening|day))[\.!\?]*$",
             r"^(?:who\s+(?:is\s+this|are\s+you))[\.!\?]*$",
+            r"^(?:please\s+)?(?:stop(?:\s+it)?(?:\s+right\s+now)?|wait(?:\s+(?:a\s+sec(?:ond)?|a\s+minute|up))?|hold\s+on(?:\s+(?:a\s+sec(?:ond)?|a\s+minute))?|pause|hang\s+on|one\s+sec(?:ond)?|just\s+a\s+(?:sec(?:ond)?|minute|moment))(?:\s+please)?[\.!\?]*$",
         ]
-        self._direct_regex = re.compile("|".join(direct_greetings), re.IGNORECASE)
+        self._direct_regex = re.compile("|".join(direct_phrases), re.IGNORECASE)
 
         # Common word tokenizer regex
         self._word_tokenizer = re.compile(r"\b[\w']+\b")

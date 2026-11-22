@@ -435,6 +435,46 @@ def apply_fade_out(
     return out
 
 
+def trim_audio_silence(
+    audio: np.ndarray,
+    threshold: float = 0.005,
+    pad_ms: float = 12.0,
+    sr: int = 24000
+) -> np.ndarray:
+    """
+    Trims Kokoro's padded silence (typically 150-350ms of dead zeros at head & tail)
+    while preserving a smooth 10-15ms acoustic breathing envelope.
+    Prevents choppy gaps, clicks, and broken prosody between sentences and clauses.
+    """
+    if len(audio) == 0:
+        return audio
+
+    is_int16 = (audio.dtype == np.int16)
+    work = (audio.astype(np.float32) / 32768.0) if is_int16 else audio.astype(np.float32)
+
+    pad_samples = int(round(sr * (pad_ms / 1000.0)))
+    is_speech = np.abs(work) > threshold
+    if not np.any(is_speech):
+        return np.zeros(0, dtype=audio.dtype)
+
+    start = max(0, int(np.argmax(is_speech)) - pad_samples)
+    end = min(len(work), len(work) - int(np.argmax(is_speech[::-1])) + pad_samples)
+    trimmed = work[start:end].copy()
+
+    # Apply natural acoustic breathing envelope (fade-in & fade-out)
+    fade_len = min(pad_samples, len(trimmed) // 2)
+    if fade_len > 1:
+        t = np.linspace(0.0, 1.0, fade_len, endpoint=False, dtype=np.float32)
+        fade_in = 0.5 * (1.0 - np.cos(np.pi * t))
+        fade_out = 0.5 * (1.0 + np.cos(np.pi * t))
+        trimmed[:fade_len] *= fade_in
+        trimmed[-fade_len:] *= fade_out
+
+    if is_int16:
+        return np.clip(trimmed * 32768.0, -32768.0, 32767.0).astype(np.int16)
+    return trimmed
+
+
 # ==============================================================================
 # 5. STREAMING CROSSFADE BUFFER (REAL-TIME QUEUE)
 # ==============================================================================

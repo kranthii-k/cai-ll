@@ -25,7 +25,17 @@ from engine.crossfade_buffer import CrossfadeBuffer, apply_crossfade, apply_fade
 from engine.echo_canceller import EchoReferenceTap, InboundAudioProcessor
 from engine.fast_classifier import ConversationalStance, FastClassifier
 from engine.filler_manager import FillerManager
-from telephony_server import app, CallSession, mulaw_to_pcm16_16k, pcm16k_to_mulaw8k
+from telephony_server import (
+    app,
+    CallSession,
+    mulaw_to_pcm16_16k,
+    pcm16k_to_mulaw8k,
+    DEFAULT_SILENCE_TIMEOUT_MS,
+    SILENCE_TIMEOUT_MS,
+    calculate_dynamic_silence_timeout,
+    check_acoustic_clause_completion,
+    is_incomplete_thought,
+)
 
 
 class TestEchoReferenceTap(unittest.TestCase):
@@ -150,6 +160,131 @@ class TestAcousticEchoCancellationAndBargeIn(unittest.TestCase):
 
         self.assertTrue(barge_in_fired, "Continuous speech >300ms failed to trigger barge-in!")
 
+    def test_laptop_speakerphone_loud_feedback_never_triggers_false_barge_in(self):
+        """Simulates loud laptop speakerphone echo (coupling factor 0.5): must never trigger false barge-in."""
+        self.tap.clear()
+        self.processor.reset_state()
+
+        # Bot is speaking modulated audio
+        total_frames = 40
+        frame_samples = 320  # 20ms
+        t_out = np.linspace(0, total_frames * 0.02, total_frames * frame_samples, endpoint=False, dtype=np.float32)
+        f = 200 + 40 * np.sin(2 * np.pi * 4 * t_out)
+        bot_audio = 0.6 * np.sin(2 * np.pi * f * t_out)
+
+        # 60ms delay = 3 frames of 20ms
+        delay_frames = 3
+
+        # Prime the tap with the initial 60ms of bot speech
+        for f_idx in range(delay_frames):
+            frame = bot_audio[f_idx * frame_samples:(f_idx + 1) * frame_samples]
+            self.tap.push_reference(frame, sample_rate=self.sample_rate)
+
+        # Stream remaining frames: bot plays new frame, mic receives 60ms delayed echo at coupling 0.5
+        false_barge_in = False
+        for f_idx in range(delay_frames, delay_frames + 25):
+            bot_frame = bot_audio[f_idx * frame_samples:(f_idx + 1) * frame_samples]
+            self.tap.push_reference(bot_frame, sample_rate=self.sample_rate)
+
+            echo_chunk = bot_audio[(f_idx - delay_frames) * frame_samples:(f_idx - delay_frames + 1) * frame_samples] * 0.5
+            cleaned, is_barge, metrics = self.processor.process_frame(echo_chunk)
+            if is_barge:
+                false_barge_in = True
+                break
+
+        self.assertFalse(false_barge_in, "Loud laptop speakerphone echo triggered false barge-in!")
+
+    def test_barge_in_holdoff_active_at_utterance_start(self):
+        """Verifies 450ms holdoff suppresses onset transients at the start of any TTS utterance."""
+        proc = InboundAudioProcessor(
+            echo_tap=self.tap,
+            sample_rate=self.sample_rate,
+            barge_in_holdoff_ms=450.0,
+            barge_in_urgent_energy=0.14
+        )
+        now = time.time()
+        proc.notify_utterance_start(now)
+
+        # Push 100ms of bot reference
+        t_out = np.linspace(0, 0.1, int(self.sample_rate * 0.1), endpoint=False, dtype=np.float32)
+        self.tap.push_reference(0.5 * np.sin(2 * np.pi * 350 * t_out))
+
+        # Transient speaker click / power-on noise frame during holdoff window
+        t_frame = np.linspace(0, 0.02, 320, endpoint=False, dtype=np.float32)
+        transient_frame = 0.25 * np.sin(2 * np.pi * 1000 * t_frame)
+
+        # Process frames within holdoff (<450ms)
+        for _ in range(10):
+            self.assertFalse(proc.should_interrupt(transient_frame), "Hold-off failed to suppress onset transient!")
+
+        # After holdoff expires (>450ms), human caller says 'stop'
+        proc._utterance_start_time = now - 0.500  # 500ms ago (>450ms)
+        # Push active reference so bot is speaking
+        t_active = np.linspace(0, 0.5, int(self.sample_rate * 0.5), endpoint=False, dtype=np.float32)
+        self.tap.push_reference(0.4 * np.sin(2 * np.pi * 350 * t_active))
+
+        caller_voice = 0.18 * np.sin(2 * np.pi * 600 * t_frame)
+        barge_in = False
+        for _ in range(8):  # 160ms urgent speech
+            if proc.should_interrupt(caller_voice):
+                barge_in = True
+                break
+        self.assertTrue(barge_in, "True barge-in failed to trigger after holdoff elapsed!")
+
+    def test_urgent_barge_in_keywords_sub_200ms_cutoff(self):
+        """Caller saying urgent keyword ('stop', 'wait', 'hold on') triggers sub-200ms interruption."""
+        proc = InboundAudioProcessor(
+            echo_tap=self.tap,
+            sample_rate=self.sample_rate,
+            barge_in_urgent_energy=0.14
+        )
+        # Bot is speaking
+        t_out = np.linspace(0, 1.0, self.sample_rate, endpoint=False, dtype=np.float32)
+        self.tap.push_reference(0.4 * np.sin(2 * np.pi * 300 * t_out))
+
+        # Caller says 'STOP!' (duration 160ms = 8 frames, energy 0.18)
+        frame_samples = 320
+        t_frame = np.linspace(0, 0.02, frame_samples, endpoint=False, dtype=np.float32)
+        urgent_speech = 0.18 * np.sin(2 * np.pi * 700 * t_frame)
+
+        barge_in_triggered = False
+        frames_to_trigger = 0
+        for idx in range(8):
+            if proc.should_interrupt(urgent_speech):
+                barge_in_triggered = True
+                frames_to_trigger = idx + 1
+                break
+
+        self.assertTrue(barge_in_triggered, "Urgent barge-in keyword failed to trigger!")
+        latency_ms = frames_to_trigger * 20
+        self.assertLessEqual(latency_ms, 180, f"Urgent barge-in took {latency_ms}ms, exceeded 180ms budget!")
+
+    def test_double_talk_echo_cancelled_caller_audio_preserved(self):
+        """Under double-talk, speaker echo is subtracted while caller's voice is preserved unmuted."""
+        # Bot speaking 300Hz tone
+        t_out = np.linspace(0, 0.5, int(self.sample_rate * 0.5), endpoint=False, dtype=np.float32)
+        bot_audio = 0.5 * np.sin(2 * np.pi * 300 * t_out)
+        self.tap.push_reference(bot_audio)
+
+        # Delayed echo: 60ms delay, coupling 0.4
+        delay_s = int(0.060 * self.sample_rate)
+        echo_frame = bot_audio[delay_s:delay_s + 320] * 0.4
+
+        # Caller says 'WAIT!': 800Hz tone, amplitude 0.20
+        t_frame = np.linspace(0, 0.02, 320, endpoint=False, dtype=np.float32)
+        caller_voice = 0.20 * np.sin(2 * np.pi * 800 * t_frame)
+
+        double_talk_frame = echo_frame + caller_voice
+
+        cleaned, should_interrupt, metrics = self.processor.process_frame(double_talk_frame)
+
+        # In double-talk, caller voice must NOT be suppressed by 95%!
+        caller_orig_rms = float(np.sqrt(np.mean(caller_voice ** 2)))
+        cleaned_rms = float(np.sqrt(np.mean(cleaned ** 2)))
+
+        self.assertGreater(cleaned_rms, 0.5 * caller_orig_rms, "Caller voice was aggressively muted in double-talk!")
+        self.assertFalse(metrics.is_echo, "Double-talk was erroneously classified as pure echo!")
+
 
 class TestCrossfadeBuffer(unittest.TestCase):
     """Tests for equal-power crossfader and non-blocking streaming queue."""
@@ -272,6 +407,177 @@ class TestTelephonyFastAPIEndpoints(unittest.TestCase):
             self.assertIn("stance", event)
             self.assertIn("latency_ms", event)
 
+    def test_telemetry_endpoint(self):
+        """Verifies GET /api/telemetry returns full latency waterfall and percentile metrics."""
+        response = self.client.get("/api/telemetry")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data.get("status"), "healthy")
+        self.assertIn("barge_in_stats", data)
+        self.assertIn("stt_metrics", data)
+        self.assertIn("latency_summaries", data)
+        self.assertIn("p50_summary", data)
+        self.assertIn("p90_summary", data)
+        self.assertIn("p99_summary", data)
+        self.assertIn("recent_turns", data)
+
+    def test_telemetry_reset_endpoint(self):
+        """Verifies POST /api/telemetry/reset resets all counters."""
+        reset_res = self.client.post("/api/telemetry/reset")
+        self.assertEqual(reset_res.status_code, 200)
+        self.assertEqual(reset_res.json().get("status"), "success")
+
+        get_res = self.client.get("/api/telemetry")
+        self.assertEqual(get_res.status_code, 200)
+        data = get_res.json()
+        self.assertEqual(data.get("total_turns"), 0)
+        self.assertEqual(data.get("barge_in_stats", {}).get("total_barge_ins"), 0)
+
+
+class TestDynamicTurnTakingAndVAD(unittest.TestCase):
+    """Tests for Dynamic VAD Endpointing, Turn-Taking, and Speech Chopping Prevention."""
+
+    def test_default_silence_timeout_in_range(self):
+        """Verifies default silence timeout is in the 450ms–500ms range."""
+        self.assertGreaterEqual(DEFAULT_SILENCE_TIMEOUT_MS, 450.0)
+        self.assertLessEqual(DEFAULT_SILENCE_TIMEOUT_MS, 500.0)
+        self.assertEqual(SILENCE_TIMEOUT_MS, DEFAULT_SILENCE_TIMEOUT_MS)
+
+    def test_short_speech_requires_at_least_500ms_silence(self):
+        """If accumulated speech < 1.0s, require >= 500ms of silence before concluding turn."""
+        # 0.4s utterance
+        timeout_short = calculate_dynamic_silence_timeout(speech_duration_s=0.4, is_clause_complete=False)
+        self.assertGreaterEqual(timeout_short, 500.0)
+
+        # 0.9s utterance
+        timeout_09 = calculate_dynamic_silence_timeout(speech_duration_s=0.9, is_clause_complete=True)
+        self.assertGreaterEqual(timeout_09, 500.0)
+
+    def test_long_speech_clause_complete_allows_400ms(self):
+        """If speech is longer (>1.5s) and user completed a clause, allow 400ms."""
+        timeout_long_clause = calculate_dynamic_silence_timeout(speech_duration_s=1.8, is_clause_complete=True)
+        self.assertEqual(timeout_long_clause, 400.0)
+
+        timeout_long_2s = calculate_dynamic_silence_timeout(speech_duration_s=2.5, is_clause_complete=True)
+        self.assertEqual(timeout_long_2s, 400.0)
+
+    def test_long_speech_incomplete_clause_uses_default_timeout(self):
+        """If speech is longer (>1.5s) but clause is incomplete, use default timeout (480ms)."""
+        timeout_incomplete = calculate_dynamic_silence_timeout(speech_duration_s=1.8, is_clause_complete=False)
+        self.assertEqual(timeout_incomplete, DEFAULT_SILENCE_TIMEOUT_MS)
+
+    def test_acoustic_clause_completion_cadence(self):
+        """Tests acoustic clause completion detection via terminal energy decay."""
+        # Case 1: Falling energy decay across the last frames (natural terminal cadence)
+        frames_decay = [0.25 * np.ones(512, dtype=np.float32) for _ in range(30)]  # 30 * 32ms ~= 1.0s
+        # Terminal decay over last 5 frames
+        frames_decay.extend([
+            0.15 * np.ones(512, dtype=np.float32),
+            0.10 * np.ones(512, dtype=np.float32),
+            0.06 * np.ones(512, dtype=np.float32),
+            0.04 * np.ones(512, dtype=np.float32),
+            0.02 * np.ones(512, dtype=np.float32),
+        ])
+        is_complete = check_acoustic_clause_completion(
+            audio_buffer=frames_decay,
+            speech_frames_count=35,
+            speech_duration_s=1.8
+        )
+        self.assertTrue(is_complete, "Natural energy decay should indicate completed clause")
+
+        # Case 2: Abrupt cutoff (high energy right up to silence boundary)
+        frames_abrupt = [0.25 * np.ones(512, dtype=np.float32) for _ in range(35)]
+        is_abrupt_complete = check_acoustic_clause_completion(
+            audio_buffer=frames_abrupt,
+            speech_frames_count=35,
+            speech_duration_s=1.8
+        )
+        self.assertFalse(is_abrupt_complete, "Abrupt cutoff should NOT indicate completed clause")
+
+    def test_syntactic_thought_completeness(self):
+        """Verifies syntactic completeness checking for thoughts."""
+        # Incomplete fragments
+        self.assertTrue(is_incomplete_thought("Kind of weird,"))
+        self.assertTrue(is_incomplete_thought("I mean,"))
+        self.assertTrue(is_incomplete_thought("I mean"))
+        self.assertTrue(is_incomplete_thought("because"))
+        self.assertTrue(is_incomplete_thought("I wanted to check because"))
+        self.assertTrue(is_incomplete_thought("and then"))
+        self.assertTrue(is_incomplete_thought("so"))
+        self.assertTrue(is_incomplete_thought("plan..."))
+
+        # Complete thoughts
+        self.assertFalse(is_incomplete_thought("Kind of weird, I mean, to John Doe's plan."))
+        self.assertFalse(is_incomplete_thought("What time does the store open?"))
+        self.assertFalse(is_incomplete_thought("I would like to cancel my subscription."))
+
+    def test_chopping_prevention_on_human_pauses(self):
+        """
+        Simulates caller speaking:
+        'Kind of weird' [250ms pause] 'I mean' [250ms pause] 'to John Doe' [250ms pause] 'plan' [600ms final pause]
+        Verifies that with 250ms pauses, human speech is NOT chopped into fragments,
+        but collected as a single complete thought before turn conclusion.
+        """
+        frame_ms = 32.0
+        sequence = [
+            (True, 600),   # 'Kind of weird'
+            (False, 250),  # 250ms natural pause
+            (True, 350),   # 'I mean'
+            (False, 250),  # 250ms natural pause
+            (True, 600),   # 'to John Doe'
+            (False, 250),  # 250ms natural pause
+            (True, 300),   # 'plan'
+            (False, 600),  # 600ms turn-concluding silence
+        ]
+
+        emitted_speech_chunks = []
+        audio_buffer = []
+        pre_speech_buffer = []
+        is_speaking = False
+        silence_ms = 0.0
+        speech_frames = 0
+
+        for is_speech, duration_ms in sequence:
+            num_frames = int(duration_ms / frame_ms)
+            for _ in range(num_frames):
+                frame = 0.2 * np.ones(512, dtype=np.float32) if is_speech else np.zeros(512, dtype=np.float32)
+                prob = 0.85 if is_speech else 0.0
+
+                if prob > 0.25:
+                    if not is_speaking:
+                        is_speaking = True
+                        audio_buffer.extend(pre_speech_buffer)
+                        pre_speech_buffer = []
+                        speech_frames = 0
+                    audio_buffer.append(frame)
+                    speech_frames += 1
+                    silence_ms = 0.0
+                else:
+                    if not is_speaking:
+                        pre_speech_buffer.append(frame)
+                        if len(pre_speech_buffer) > 25:
+                            pre_speech_buffer.pop(0)
+                    else:
+                        audio_buffer.append(frame)
+                        silence_ms += frame_ms
+                        speech_s = speech_frames * (512 / 16000)
+                        is_clause_comp = speech_s > 1.5
+                        timeout = calculate_dynamic_silence_timeout(speech_s, is_clause_comp)
+
+                        if silence_ms >= timeout:
+                            is_speaking = False
+                            silence_ms = 0.0
+                            if len(audio_buffer) > 0:
+                                emitted_speech_chunks.append(np.concatenate(audio_buffer))
+                            audio_buffer = []
+                            speech_frames = 0
+
+        # Must emit EXACTLY 1 chunk containing the full utterance, NOT 4 chopped pieces!
+        self.assertEqual(
+            len(emitted_speech_chunks), 1,
+            f"Speech was chopped into {len(emitted_speech_chunks)} fragments instead of 1 complete thought!"
+        )
+
 
 def run_tests():
     """Runs test suite and prints structured output."""
@@ -285,6 +591,7 @@ def run_tests():
     suite.addTest(loader.loadTestsFromTestCase(TestAcousticEchoCancellationAndBargeIn))
     suite.addTest(loader.loadTestsFromTestCase(TestCrossfadeBuffer))
     suite.addTest(loader.loadTestsFromTestCase(TestTelephonyFastAPIEndpoints))
+    suite.addTest(loader.loadTestsFromTestCase(TestDynamicTurnTakingAndVAD))
 
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)
