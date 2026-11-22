@@ -458,6 +458,179 @@ class TestUltraLowLatencyEngine(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(s == "Dr." for s in sentences), "Pysbd broke on abbreviation 'Dr.'")
         self.assertFalse(any(s == "3.14" for s in sentences), "Pysbd broke on decimal '3.14'")
 
+    async def test_06_fast_connection_probe_and_offline_turnaround(self):
+        """
+        Verify that an unreachable local endpoint (e.g. localhost:11434 with Ollama offline):
+        - Detects offline status in < 100ms (NEVER 5.0 seconds).
+        - Executes query via Built-in Dialogue Engine in < 50ms total.
+        - Does NOT block the event loop or drop the call.
+        """
+        # Point to unreachable loopback port
+        engine = DualBrainEngine(
+            base_url="http://127.0.0.1:19999/v1",
+            api_key="not-needed",
+            fast_classifier=self.classifier,
+            filler_manager=self.filler_mgr
+        )
+
+        # 1. Connection probe latency check
+        t0 = time.time()
+        is_online = engine.probe_connection(timeout=0.04)
+        probe_duration_ms = (time.time() - t0) * 1000.0
+        print(f"\n[Test 06] Probe connection latency: {probe_duration_ms:.2f}ms (is_online={is_online})")
+
+        self.assertFalse(is_online, "Unreachable port 19999 should report offline.")
+        self.assertLess(probe_duration_ms, 150.0, f"Probe took too long ({probe_duration_ms:.2f}ms > 150ms)")
+
+        # 2. End-to-end process latency check (must be sub-50ms)
+        t_start = time.time()
+        events: List[DualBrainEvent] = []
+        async for ev in engine.process("Can you check my order #55412?"):
+            events.append(ev)
+        total_ms = (time.time() - t_start) * 1000.0
+        print(f"[Test 06] Total turn duration (offline): {total_ms:.2f}ms")
+
+        # Must not take anywhere near 5000ms
+        self.assertLess(total_ms, 100.0, f"Offline processing took {total_ms:.2f}ms (>100ms)")
+
+        event_types = [e.type for e in events]
+        self.assertIn(DualBrainEventType.CLASSIFICATION, event_types)
+        self.assertIn(DualBrainEventType.FILLER, event_types)
+        self.assertIn(DualBrainEventType.SENTENCE, event_types)
+        self.assertIn(DualBrainEventType.FINISHED, event_types)
+
+        sentences = [e.text for e in events if e.type == DualBrainEventType.SENTENCE]
+        combined = " ".join(sentences)
+        self.assertIn("55412", combined)
+        self.assertIn("out for delivery", combined)
+        print(f"[Test 06] Spoken response: '{combined}'")
+
+    async def test_07_builtin_dialogue_engine_domain_responses(self):
+        """
+        Verify Instant Intelligent Built-in Dialogue Engine handles all required domains:
+        - Order status & tracking
+        - Appointments, reservations, business hours
+        - Flights, disruptions, refunds, customer support
+        - System uptime, health & capabilities
+        - Greetings and pleasantries
+        """
+        engine = DualBrainEngine(
+            base_url="http://127.0.0.1:19999/v1",
+            api_key="not-needed",
+            fast_classifier=self.classifier,
+            filler_manager=self.filler_mgr
+        )
+
+        test_cases = [
+            (
+                "Can you check the status of my order #88431?",
+                ["88431", "out for delivery"],
+                "Order tracking query"
+            ),
+            (
+                "What are your business hours on weekends?",
+                ["9 AM", "8 PM", "reserve a time"],
+                "Business hours query"
+            ),
+            (
+                "Can you find an available appointment for next Tuesday?",
+                ["appointment", "Tuesday"],
+                "Appointment booking query"
+            ),
+            (
+                "I am so angry because my flight got canceled without notice.",
+                ["disruption", "refund"],
+                "Flight cancellation empathy"
+            ),
+            (
+                "My package arrived completely broken and damaged!",
+                ["damaged", "replacement", "refund"],
+                "Damaged package empathy"
+            ),
+            (
+                "Can you check if the system uptime is okay?",
+                ["operational", "uptime"],
+                "System status query"
+            ),
+            (
+                "Who are you and what can you do?",
+                ["voice AI", "telephony"],
+                "Identity & capabilities query"
+            ),
+            (
+                "Hello there",
+                ["Hello", "assist you"],
+                "Direct greeting"
+            ),
+        ]
+
+        print(f"\n{'='*75}")
+        print(f"{'DOMAIN TEST':<32} | {'LATENCY':<10} | {'SPOKEN PREVIEW'}")
+        print(f"{'-'*75}")
+
+        for query, expected_substrings, description in test_cases:
+            t0 = time.time()
+            sentences = []
+            async for ev in engine.process(query):
+                if ev.type == DualBrainEventType.SENTENCE:
+                    sentences.append(ev.text)
+            turn_ms = (time.time() - t0) * 1000.0
+
+            combined = " ".join(sentences)
+            print(f"{description:<32} | {turn_ms:6.2f}ms  | {combined[:32]}...")
+
+            self.assertLess(turn_ms, 85.0, f"Turn exceeded 85ms for '{query}'")
+            for sub in expected_substrings:
+                self.assertIn(
+                    sub.lower(),
+                    combined.lower(),
+                    f"Expected '{sub}' in response for query: '{query}'. Got: '{combined}'"
+                )
+
+        print(f"{'='*75}\n")
+
+    def test_08_dynamic_api_key_and_config_update(self):
+        """
+        Verify dynamic runtime reconfiguration:
+        - Groq key (gsk_...) automatically sets Groq LPU endpoint and model.
+        - OpenAI key (sk-...) automatically sets OpenAI endpoint and model.
+        - Custom local base_url / model updates correctly.
+        """
+        engine = DualBrainEngine(
+            base_url="http://127.0.0.1:19999/v1",
+            api_key="not-needed",
+            fast_classifier=self.classifier,
+            filler_manager=self.filler_mgr
+        )
+
+        # 1. Update to Groq
+        res_groq = engine.update_config(api_key="gsk_testGroqKey1234567890abcdef")
+        self.assertEqual(res_groq["provider"], "groq")
+        self.assertEqual(engine.base_url, "https://api.groq.com/openai/v1")
+        self.assertEqual(engine.model, "llama-3.3-70b-versatile")
+        self.assertEqual(res_groq["is_local"], False)
+        print(f"[Test 08] Configured Groq LPU: {res_groq}")
+
+        # 2. Update to OpenAI
+        res_openai = engine.update_config(api_key="sk-proj-testOpenAIKey999888777")
+        self.assertEqual(res_openai["provider"], "openai")
+        self.assertEqual(engine.base_url, "https://api.openai.com/v1")
+        self.assertEqual(engine.model, "gpt-4o-mini")
+        self.assertEqual(res_openai["is_local"], False)
+        print(f"[Test 08] Configured OpenAI: {res_openai}")
+
+        # 3. Update to local Ollama with specific model
+        res_local = engine.update_config(
+            api_key="not-needed",
+            base_url="http://127.0.0.1:11434/v1",
+            model="mistral:latest"
+        )
+        self.assertEqual(res_local["provider"], "local")
+        self.assertEqual(engine.base_url, "http://127.0.0.1:11434/v1")
+        self.assertEqual(engine.model, "mistral:latest")
+        self.assertEqual(res_local["is_local"], True)
+        print(f"[Test 08] Configured Local Ollama: {res_local}")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

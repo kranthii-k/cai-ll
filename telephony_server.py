@@ -58,7 +58,14 @@ from kokoro_onnx import Kokoro
 from openai import AsyncOpenAI
 import pysbd
 
-from engine.crossfade_buffer import CrossfadeBuffer, apply_crossfade
+from engine.crossfade_buffer import (
+    CrossfadeBuffer,
+    apply_crossfade,
+    resample_24k_to_16k,
+    resample_16k_to_8k,
+    resample_8k_to_16k,
+    resample_audio,
+)
 from engine.echo_canceller import EchoReferenceTap, InboundAudioProcessor
 from engine.fast_classifier import ConversationalStance, FastClassifier
 from engine.filler_manager import FillerItem, FillerManager
@@ -136,8 +143,9 @@ def initialize_models():
 
     if registry.dual_brain is None:
         registry.dual_brain = DualBrainEngine(
-            model=os.getenv("LLM_MODEL", "qwen2.5:0.5b"),
-            base_url=os.getenv("OPENAI_BASE_URL", "http://localhost:11434/v1"),
+            model=os.getenv("LLM_MODEL"),
+            base_url=os.getenv("OPENAI_BASE_URL"),
+            api_key=os.getenv("GROQ_API_KEY") or os.getenv("OPENAI_API_KEY"),
             filler_manager=registry.filler_manager,
             fast_classifier=registry.fast_classifier,
         )
@@ -156,7 +164,6 @@ def mulaw_to_pcm16_16k(mulaw_bytes: bytes, cv_state: Optional[Any] = None) -> Tu
         return pcm_np, next_cv
     else:
         # Fallback without audioop
-        import scipy.signal
         # Simple mu-law decode table
         lut = np.zeros(256, dtype=np.int16)
         for i in range(256):
@@ -166,8 +173,8 @@ def mulaw_to_pcm16_16k(mulaw_bytes: bytes, cv_state: Optional[Any] = None) -> Tu
             mantissa = b & 0x0F
             lut[i] = sign * ((mantissa << (exponent + 3)) + (132 << exponent) - 132)
         raw_int = lut[np.frombuffer(mulaw_bytes, dtype=np.uint8)]
-        # Upsample 8k to 16k
-        up = scipy.signal.resample(raw_int.astype(np.float32), len(raw_int) * 2) / 32768.0
+        # Upsample 8k to 16k using polyphase FIR / soxr resampler
+        up = resample_8k_to_16k(raw_int.astype(np.float32)) / 32768.0
         return up, None
 
 
@@ -179,8 +186,7 @@ def pcm16k_to_mulaw8k(pcm_16k_float: np.ndarray, cv_state: Optional[Any] = None)
         mulaw_bytes = audioop.lin2ulaw(pcm_8k, 2)
         return mulaw_bytes, next_cv
     else:
-        import scipy.signal
-        pcm_8k_float = scipy.signal.resample(pcm_16k_float, len(pcm_16k_float) // 2)
+        pcm_8k_float = resample_16k_to_8k(pcm_16k_float)
         # Mu-law companding formula
         s = np.clip(pcm_8k_float, -1.0, 1.0)
         u = 255.0
@@ -459,7 +465,9 @@ class CallSession:
 
         # Step 2: Immediate Acoustic / Textual Filler if latency masking needed
         if classification.latency_masking_required:
-            filler = registry.filler_manager.get_filler(classification.stance, text)
+            filler = registry.filler_manager.get_filler(
+                classification.stance, text, sample_rate=16000, dtype=np.float32
+            )
             if filler:
                 time_to_filler_ms = (time.time() - turn_start) * 1000.0
                 logger.info(f"⚡ Fast Filler [{classification.stance.value}]: {filler.text} ({time_to_filler_ms:.1f}ms)")
@@ -479,28 +487,9 @@ class CallSession:
                     "timestamp": time.time()
                 })
 
-                # Queue filler audio
-                filler_audio_float = None
-                if registry.kokoro is not None:
-                    try:
-                        f_samples, f_sr = await asyncio.to_thread(
-                            registry.kokoro.create, filler.text, voice="af_heart", speed=1.1, lang="en-us"
-                        )
-                        # Kokoro is 24kHz -> resample to 16kHz
-                        if f_sr != 16000:
-                            import scipy.signal
-                            target_n = int(round(len(f_samples) * 16000.0 / f_sr))
-                            filler_audio_float = scipy.signal.resample(f_samples, target_n)
-                        else:
-                            filler_audio_float = f_samples
-                    except Exception as e:
-                        logger.warning(f"Kokoro filler synthesis fallback: {e}")
-
-                if filler_audio_float is None and filler.audio_bytes:
-                    # Use acoustic chime cue
-                    filler_audio_float = np.frombuffer(filler.audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
-
-                if filler_audio_float is not None:
+                # Queue pre-rendered filler audio immediately (<1ms)
+                filler_audio_float = filler.get_samples(target_sr=16000, dtype=np.float32)
+                if filler_audio_float is not None and len(filler_audio_float) > 0:
                     self.crossfade_buffer.write_chunk(filler_audio_float, crossfade=False)
 
         # Step 3: Concurrently stream Deep-Path LLM reasoning
@@ -533,10 +522,13 @@ class CallSession:
                             samples, sr = await asyncio.to_thread(
                                 registry.kokoro.create, sentence, voice="af_heart", speed=1.05, lang="en-us"
                             )
-                            # Kokoro is 24kHz -> resample to 16kHz
-                            import scipy.signal
-                            target_samples = int(round(len(samples) * 16000.0 / sr))
-                            pcm_16k = scipy.signal.resample(samples, target_samples)
+                            # Kokoro is 24kHz -> resample to 16kHz using high-quality polyphase FIR / soxr
+                            if sr == 24000:
+                                pcm_16k = resample_24k_to_16k(samples)
+                            elif sr != 16000:
+                                pcm_16k = resample_audio(samples, sr, 16000)
+                            else:
+                                pcm_16k = samples.astype(np.float32)
                         else:
                             # Fallback tone for testing
                             num_s = int(16000 * 0.4)
@@ -574,9 +566,12 @@ class CallSession:
                     samples, sr = await asyncio.to_thread(
                         registry.kokoro.create, fallback_text, voice="af_heart", speed=1.05, lang="en-us"
                     )
-                    import scipy.signal
-                    target_samples = int(round(len(samples) * 16000.0 / sr))
-                    pcm_16k = scipy.signal.resample(samples, target_samples)
+                    if sr == 24000:
+                        pcm_16k = resample_24k_to_16k(samples)
+                    elif sr != 16000:
+                        pcm_16k = resample_audio(samples, sr, 16000)
+                    else:
+                        pcm_16k = samples.astype(np.float32)
                     self.crossfade_buffer.write_chunk(pcm_16k, crossfade=True, crossfade_ms=30.0)
                 except Exception:
                     pass
@@ -608,17 +603,23 @@ class CallSession:
         """
         Streams queued audio from CrossfadeBuffer to WebSocket:
         - Twilio: converts 16kHz Float32 -> 8kHz mu-law (20ms / 160-byte chunks).
-        - Web: streams 16kHz Int16 binary frames (20ms / 640 bytes).
+        - Web: streams 16kHz Int16 binary frames in smooth 100ms chunks (1600 samples / 3200 bytes).
         - Taps all outbound frames into EchoReferenceTap to cancel speakerphone acoustic echo!
         """
-        # 20ms frame size at 16kHz = 320 samples
-        FRAME_SAMPLES_16K = 320
+        # Frame sizes at 16kHz:
+        # Twilio PSTN strictly requires 20ms frames (320 samples at 16kHz -> 160 samples at 8kHz)
+        # Web browser streaming uses 100ms frames (1600 samples) to prevent timer jitter and underruns
+        FRAME_SAMPLES_TWILIO = 320   # 20ms
+        FRAME_SAMPLES_WEB = 1600     # 100ms
+
+        frame_samples = FRAME_SAMPLES_TWILIO if self.mode == "twilio" else FRAME_SAMPLES_WEB
 
         while self.is_connected:
             try:
-                frame_16k = await self.crossfade_buffer.read_frame_async(FRAME_SAMPLES_16K, timeout=0.05)
+                frame_16k = await self.crossfade_buffer.read_frame_async(frame_samples, timeout=0.05)
                 if len(frame_16k) == 0:
-                    if self.tts_playing and not self.crossfade_buffer.has_data():
+                    is_generating = bool(self.current_tts_task and not self.current_tts_task.done())
+                    if self.tts_playing and not self.crossfade_buffer.has_data() and not is_generating:
                         self.tts_playing = False
                         if self.mode == "web":
                             await self.send_json_safe({"event": "tts_stop"})
@@ -649,8 +650,11 @@ class CallSession:
                 elif self.mode == "web":
                     int16_bytes = (np.clip(frame_16k, -1.0, 1.0) * 32767.0).astype(np.int16).tobytes()
                     await self.websocket.send_bytes(int16_bytes)
-                    # Frame pacing: ~20ms
-                    await asyncio.sleep(0.019)
+                    # Web streaming pacing: deliver with slight lead (~80% frame duration)
+                    # so client jitter buffer stays comfortably populated without sleep jitter starvation
+                    frame_dur = len(frame_16k) / 16000.0
+                    sleep_dur = max(0.01, frame_dur * 0.8)
+                    await asyncio.sleep(sleep_dur)
 
             except asyncio.CancelledError:
                 break
@@ -664,6 +668,37 @@ class CallSession:
 async def serve_web_phone():
     """Serves the enhanced full-duplex web phone interface."""
     return FileResponse("web_phone.html")
+
+
+@app.get("/api/config")
+async def get_config():
+    """Returns current active brain status and configuration."""
+    if not registry.dual_brain:
+        return {"status": "not_initialized", "is_online": False}
+    return {
+        "provider": "groq" if "groq" in registry.dual_brain.base_url else ("openai" if "openai" in registry.dual_brain.base_url else "local"),
+        "model": registry.dual_brain.model,
+        "base_url": registry.dual_brain.base_url,
+        "is_online": registry.dual_brain.is_llm_available(),
+        "has_api_key": bool(registry.dual_brain.api_key and registry.dual_brain.api_key != "not-needed"),
+    }
+
+
+@app.post("/api/config")
+async def update_config_endpoint(request: Request):
+    """Dynamically updates API key, base URL, and model for DualBrainEngine."""
+    body = await request.json()
+    api_key = body.get("api_key")
+    base_url = body.get("base_url")
+    model = body.get("model")
+    if registry.dual_brain:
+        status = registry.dual_brain.update_config(
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+        )
+        return {"status": "success", **status}
+    return {"status": "error", "message": "DualBrainEngine not initialized"}
 
 
 @app.post("/twiml")
@@ -753,13 +788,28 @@ async def web_websocket_endpoint(websocket: WebSocket):
                     data = json.loads(message["text"])
                     if data.get("event") == "ping":
                         await websocket.send_json({"event": "pong", "timestamp": time.time()})
+                    elif data.get("event") in ("config", "set_config", "update_config"):
+                        api_key = data.get("api_key")
+                        base_url = data.get("base_url")
+                        model = data.get("model")
+                        status = {}
+                        if registry.dual_brain:
+                            status = registry.dual_brain.update_config(
+                                api_key=api_key,
+                                base_url=base_url,
+                                model=model,
+                            )
+                        await websocket.send_json({
+                            "event": "config_updated",
+                            **status
+                        })
                     elif data.get("event") == "text_prompt":
                         # Direct text prompt test
                         prompt_text = data.get("text", "")
                         if prompt_text:
                             await session.text_queue.put(prompt_text)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"WebSocket control error: {e}")
 
             if message.get("type") == "websocket.disconnect":
                 break
