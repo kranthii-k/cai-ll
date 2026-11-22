@@ -764,10 +764,11 @@
         let jitterBuffer = [];
         let jitterSamplesCount = 0;
         let flushTimer = null;
-        const MIN_BUFFER_SAMPLES = 800; // ~50ms accumulator threshold to smooth micro-chunks
-        const INITIAL_BUFFER_DELAY_SEC = 0.03; // 30ms tight cushion for fresh turn startup
-
         const TARGET_SAMPLE_RATE = 16000;
+        const INITIAL_BUFFER_DELAY_SEC = 0.045; // 45ms safe lead-time cushion when starting from idle/underrun
+        const INITIAL_PREBUFFER_SAMPLES = 1200; // ~75ms minimum accumulated samples before initial playback starts
+        const MIN_STREAM_SAMPLES = 800; // ~50ms chunk threshold when already streaming continuously
+        const FLUSH_TIMEOUT_MS = 25; // 25ms timer to flush pending samples or tail chunks
 
         // UI elements
         const callBtn = document.getElementById('callBtn');
@@ -831,20 +832,73 @@
         }
         drawVisualizer();
 
-        // Helper: Downsample captured mic audio to 16kHz
+        // Continuous, phase-aligned, accumulator-based linear interpolation resampler
+        class AudioResampler {
+            constructor(fromSampleRate, toSampleRate = 16000) {
+                this.fromSampleRate = fromSampleRate;
+                this.toSampleRate = toSampleRate;
+                this.ratio = fromSampleRate / toSampleRate;
+                this.pos = 0.0;
+                this.prevSample = 0.0;
+            }
+
+            reset() {
+                this.pos = 0.0;
+                this.prevSample = 0.0;
+            }
+
+            resample(inputData) {
+                if (!inputData || inputData.length === 0) {
+                    return new Float32Array(0);
+                }
+                if (this.fromSampleRate === this.toSampleRate) {
+                    return inputData;
+                }
+
+                const inLen = inputData.length;
+                const ratio = this.ratio;
+                // Upper bound on output sample count
+                const estimatedMax = Math.ceil((inLen - this.pos) / ratio) + 2;
+                const output = new Float32Array(Math.max(1, estimatedMax));
+                let outIdx = 0;
+
+                let pos = this.pos;
+                const prev = this.prevSample;
+
+                while (pos < inLen - 1) {
+                    const i = Math.floor(pos);
+                    const frac = Math.max(0, Math.min(1, pos - i));
+                    let s0, s1;
+
+                    if (i < 0) {
+                        s0 = prev;
+                        s1 = inputData[0];
+                    } else {
+                        s0 = inputData[i];
+                        s1 = (i + 1 < inLen) ? inputData[i + 1] : inputData[i];
+                    }
+
+                    output[outIdx++] = s0 * (1.0 - frac) + s1 * frac;
+                    pos += ratio;
+                }
+
+                this.pos = pos - inLen;
+                this.prevSample = inputData[inLen - 1];
+
+                return (outIdx === output.length) ? output : output.subarray(0, outIdx);
+            }
+        }
+
+        let micResampler = null;
+        let antiAliasFilter = null;
+
+        // Helper: Downsample captured mic audio to 16kHz with phase preservation
         function downsampleTo16k(inputData, fromRate) {
             if (fromRate === TARGET_SAMPLE_RATE) return inputData;
-            const ratio = fromRate / TARGET_SAMPLE_RATE;
-            const newLength = Math.round(inputData.length / ratio);
-            const result = new Float32Array(newLength);
-            for (let i = 0; i < newLength; i++) {
-                const origIndex = i * ratio;
-                const indexFloor = Math.floor(origIndex);
-                const indexCeil = Math.min(inputData.length - 1, Math.ceil(origIndex));
-                const frac = origIndex - indexFloor;
-                result[i] = inputData[indexFloor] * (1 - frac) + inputData[indexCeil] * frac;
+            if (!micResampler || micResampler.fromSampleRate !== fromRate) {
+                micResampler = new AudioResampler(fromRate, TARGET_SAMPLE_RATE);
             }
-            return result;
+            return micResampler.resample(inputData);
         }
 
         // Start Call
@@ -852,7 +906,22 @@
             try {
                 statusLabel.innerText = "Requesting microphone permissions...";
                 
+                const preferredConstraints = {
+                    audio: {
+                        echoCancellation: { ideal: true },
+                        noiseSuppression: { ideal: true },
+                        autoGainControl: { ideal: true },
+                        channelCount: { ideal: 1 },
+                        sampleRate: { ideal: TARGET_SAMPLE_RATE }
+                    },
+                    video: false
+                };
+
                 try {
+                    micStream = await navigator.mediaDevices.getUserMedia(preferredConstraints);
+                } catch (e) {
+                    console.warn("Retrying getUserMedia with basic audio constraints...", e);
+                    // Fallback to standard boolean audio constraints
                     micStream = await navigator.mediaDevices.getUserMedia({
                         audio: {
                             echoCancellation: true,
@@ -862,12 +931,28 @@
                         },
                         video: false
                     });
-                } catch (e) {
-                    // Fallback to simple audio constraint if specific parameters unsupported
-                    micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
                 }
 
-                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                // Verify and enforce audio processing constraints on the active mic track
+                const audioTrack = micStream.getAudioTracks()[0];
+                if (audioTrack) {
+                    const activeSettings = audioTrack.getSettings ? audioTrack.getSettings() : {};
+                    console.log("🎤 Mic Track active settings:", activeSettings);
+                    if (audioTrack.applyConstraints) {
+                        audioTrack.applyConstraints({
+                            echoCancellation: true,
+                            noiseSuppression: true,
+                            autoGainControl: true
+                        }).catch(e => console.warn("Failed to apply track constraints:", e));
+                    }
+                }
+
+                const AudioCtxClass = window.AudioContext || window.webkitAudioContext;
+                try {
+                    audioContext = new AudioCtxClass({ sampleRate: TARGET_SAMPLE_RATE });
+                } catch (e) {
+                    audioContext = new AudioCtxClass();
+                }
                 if (audioContext.state === 'suspended') {
                     await audioContext.resume();
                 }
@@ -902,9 +987,23 @@
                     micAnalyser.fftSize = 128;
                     source.connect(micAnalyser);
 
+                    const nativeRate = audioContext.sampleRate;
+                    micResampler = new AudioResampler(nativeRate, TARGET_SAMPLE_RATE);
+
                     const bufferSize = 2048;
                     scriptProcessor = audioContext.createScriptProcessor(bufferSize, 1, 1);
-                    source.connect(scriptProcessor);
+
+                    // If native sample rate > 16kHz, add a 7500Hz Butterworth lowpass filter to prevent aliasing
+                    if (nativeRate > TARGET_SAMPLE_RATE) {
+                        antiAliasFilter = audioContext.createBiquadFilter();
+                        antiAliasFilter.type = "lowpass";
+                        antiAliasFilter.frequency.setValueAtTime(7500, audioContext.currentTime);
+                        antiAliasFilter.Q.setValueAtTime(0.7071, audioContext.currentTime);
+                        source.connect(antiAliasFilter);
+                        antiAliasFilter.connect(scriptProcessor);
+                    } else {
+                        source.connect(scriptProcessor);
+                    }
                     
                     // Route to zero-gain node so user mic is not routed to speakers (prevents feedback)
                     const muteNode = audioContext.createGain();
@@ -912,16 +1011,17 @@
                     scriptProcessor.connect(muteNode);
                     muteNode.connect(audioContext.destination);
 
-                    const nativeRate = audioContext.sampleRate;
                     scriptProcessor.onaudioprocess = (e) => {
                         if (ws && ws.readyState === WebSocket.OPEN) {
                             const float32Data = e.inputBuffer.getChannelData(0);
-                            const resampled16k = downsampleTo16k(float32Data, nativeRate);
-                            const int16Data = new Int16Array(resampled16k.length);
-                            for (let i = 0; i < resampled16k.length; i++) {
-                                int16Data[i] = Math.max(-32768, Math.min(32767, resampled16k[i] * 32767));
+                            const resampled16k = micResampler.resample(float32Data);
+                            if (resampled16k.length > 0) {
+                                const int16Data = new Int16Array(resampled16k.length);
+                                for (let i = 0; i < resampled16k.length; i++) {
+                                    int16Data[i] = Math.max(-32768, Math.min(32767, resampled16k[i] * 32767));
+                                }
+                                ws.send(int16Data.buffer);
                             }
-                            ws.send(int16Data.buffer);
                         }
                     };
                 };
@@ -978,9 +1078,8 @@
                 stanceIndicator.innerText = `Stance: ${msg.stance.toUpperCase()} (${msg.latency_ms.toFixed(1)}ms)`;
             }
             else if (msg.event === "filler_start" || msg.event === "tts_start") {
-                if (audioContext && scheduledAudioSources.length === 0) {
-                    nextPlayTime = audioContext.currentTime + 0.03;
-                }
+                // DO NOT mutate nextPlayTime from async JSON control events!
+                // Timeline scheduling is self-clocked strictly by the audio stream itself.
                 if (msg.event === "filler_start") {
                     valTimeToFiller.innerText = `${msg.time_to_filler_ms} ms`;
                 }
@@ -996,11 +1095,49 @@
             }
         }
 
+        // Playback resampler: upsamples 16kHz audio to audioContext.sampleRate (e.g. 48kHz or 44.1kHz)
+        // so Web Audio AudioBufferSourceNodes play 1:1 without internal filter resets or boundary clicks.
+        function resamplePlaybackToContextRate(input, fromRate, toRate) {
+            if (!toRate || fromRate === toRate) return input;
+            if (toRate === 48000 && fromRate === 16000) {
+                const len = input.length;
+                const out = new Float32Array(len * 3);
+                let outIdx = 0;
+                for (let i = 0; i < len - 1; i++) {
+                    const s0 = input[i];
+                    const s1 = input[i + 1];
+                    out[outIdx++] = s0;
+                    out[outIdx++] = s0 + (s1 - s0) * 0.33333334;
+                    out[outIdx++] = s0 + (s1 - s0) * 0.66666668;
+                }
+                const last = input[len - 1];
+                out[outIdx++] = last;
+                out[outIdx++] = last;
+                out[outIdx++] = last;
+                return out;
+            }
+            const ratio = fromRate / toRate;
+            const outLength = Math.round(input.length / ratio);
+            const output = new Float32Array(outLength);
+            for (let i = 0; i < outLength; i++) {
+                const origIndex = i * ratio;
+                const indexFloor = Math.floor(origIndex);
+                const indexCeil = Math.min(input.length - 1, indexFloor + 1);
+                const frac = origIndex - indexFloor;
+                output[i] = input[indexFloor] * (1 - frac) + input[indexCeil] * frac;
+            }
+            return output;
+        }
+
         // Jitter buffer queue & smooth audio scheduling
         function handleBinaryAudio(arrayBuffer) {
             if (!audioContext || audioContext.state === 'closed') return;
 
-            const int16Array = new Int16Array(arrayBuffer);
+            // Guard against odd byte lengths
+            const byteLen = arrayBuffer.byteLength - (arrayBuffer.byteLength % 2);
+            if (byteLen === 0) return;
+
+            const int16Array = new Int16Array(arrayBuffer, 0, byteLen / 2);
             if (int16Array.length === 0) return;
 
             const float32Array = new Float32Array(int16Array.length);
@@ -1011,24 +1148,33 @@
             jitterBuffer.push(float32Array);
             jitterSamplesCount += float32Array.length;
 
-            // If accumulated buffer is >= MIN_BUFFER_SAMPLES (50ms) or chunk is 100ms, schedule immediately
-            if (jitterSamplesCount >= MIN_BUFFER_SAMPLES) {
+            const now = audioContext.currentTime;
+            const isPlaying = scheduledAudioSources.length > 0 && nextPlayTime >= (now + 0.005);
+            const threshold = isPlaying ? MIN_STREAM_SAMPLES : INITIAL_PREBUFFER_SAMPLES;
+
+            // If accumulated buffer reaches threshold, flush immediately to maintain continuous playback
+            if (jitterSamplesCount >= threshold) {
                 if (flushTimer) {
                     clearTimeout(flushTimer);
                     flushTimer = null;
                 }
                 flushJitterBuffer();
             } else if (!flushTimer) {
-                // Brief 20ms fallback timer to flush any leftover tail samples
+                // Brief fallback timer to flush any small turns or leftover tail samples
                 flushTimer = setTimeout(() => {
                     flushTimer = null;
                     flushJitterBuffer();
-                }, 20);
+                }, FLUSH_TIMEOUT_MS);
             }
         }
 
         function flushJitterBuffer() {
             if (!audioContext || audioContext.state === 'closed' || jitterSamplesCount === 0) return;
+
+            if (flushTimer) {
+                clearTimeout(flushTimer);
+                flushTimer = null;
+            }
 
             let merged;
             if (jitterBuffer.length === 1) {
@@ -1046,8 +1192,12 @@
 
             if (merged.length === 0) return;
 
-            const buffer = audioContext.createBuffer(1, merged.length, TARGET_SAMPLE_RATE);
-            buffer.copyToChannel(merged, 0);
+            // Match buffer sample rate exactly to audioContext.sampleRate to prevent browser resampler clicks
+            const targetRate = audioContext.sampleRate || TARGET_SAMPLE_RATE;
+            const playData = (targetRate === TARGET_SAMPLE_RATE) ? merged : resamplePlaybackToContextRate(merged, TARGET_SAMPLE_RATE, targetRate);
+
+            const buffer = audioContext.createBuffer(1, playData.length, targetRate);
+            buffer.copyToChannel(playData, 0);
 
             const source = audioContext.createBufferSource();
             source.buffer = buffer;
@@ -1055,19 +1205,28 @@
 
             const now = audioContext.currentTime;
 
-            // Continuous seamless timeline scheduling:
-            // - If audio was already active or recently finished (<200ms), connect IMMEDIATELY without injecting silent pause gaps!
-            // - Only when starting from a dead stop, add a tight 30ms cushion.
-            if (nextPlayTime < now) {
-                if (scheduledAudioSources.length > 0 || (now - nextPlayTime < 0.20)) {
-                    nextPlayTime = now;
-                } else {
-                    nextPlayTime = now + 0.03;
-                }
+            // Ensure agent gain is active for playback
+            if (agentGainNode) {
+                try {
+                    agentGainNode.gain.cancelScheduledValues(now);
+                    agentGainNode.gain.setValueAtTime(1.0, now);
+                } catch (e) {}
             }
 
-            source.start(nextPlayTime);
-            nextPlayTime += buffer.duration;
+            // Sample-accurate seamless timeline scheduling:
+            // Case 1: If audio is currently playing and nextPlayTime is ahead of now by at least 5ms,
+            // concatenate seamlessly at nextPlayTime (zero gap, zero overlap, zero click).
+            if (scheduledAudioSources.length > 0 && nextPlayTime >= (now + 0.005)) {
+                source.start(nextPlayTime);
+                nextPlayTime += buffer.duration;
+            } else {
+                // Case 2: Starting from idle or recovering from an underrun.
+                // Schedule with INITIAL_BUFFER_DELAY_SEC cushion so Web Audio's render thread
+                // never executes in the past and never drops samples.
+                nextPlayTime = now + INITIAL_BUFFER_DELAY_SEC;
+                source.start(nextPlayTime);
+                nextPlayTime += buffer.duration;
+            }
 
             scheduledAudioSources.push(source);
             source.onended = () => {
@@ -1097,7 +1256,7 @@
                             agentGainNode.gain.cancelScheduledValues(audioContext.currentTime);
                             agentGainNode.gain.setValueAtTime(1.0, audioContext.currentTime);
                         }
-                    }, 12);
+                    }, 15);
                 } catch (e) {}
             }
 
@@ -1107,14 +1266,13 @@
                     src.stop(now + 0.005);
                     setTimeout(() => {
                         try { src.disconnect(); } catch (e) {}
-                    }, 12);
+                    }, 15);
                 } catch (e) {}
             });
             scheduledAudioSources = [];
 
-            if (audioContext) {
-                nextPlayTime = audioContext.currentTime;
-            }
+            // Reset nextPlayTime to 0 so new audio starts cleanly with the initial delay cushion
+            nextPlayTime = 0;
         }
 
         function appendTranscriptMessage(role, text, isFiller = false, stance = null) {
@@ -1168,9 +1326,16 @@
                 try { agentGainNode.disconnect(); } catch (e) {}
                 agentGainNode = null;
             }
+            if (antiAliasFilter) {
+                try { antiAliasFilter.disconnect(); } catch (e) {}
+                antiAliasFilter = null;
+            }
             if (scriptProcessor) {
-                scriptProcessor.disconnect();
+                try { scriptProcessor.disconnect(); } catch (e) {}
                 scriptProcessor = null;
+            }
+            if (micResampler) {
+                micResampler.reset();
             }
             if (micStream) {
                 micStream.getTracks().forEach(t => t.stop());

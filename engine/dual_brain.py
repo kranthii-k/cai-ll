@@ -52,6 +52,19 @@ from .filler_manager import FillerItem, FillerManager
 
 logger = logging.getLogger("dual_brain")
 
+DEFAULT_TELEPHONY_SYSTEM_PROMPT = (
+    "You are a warm, helpful, and concise voice AI phone assistant handling live audio telephone calls. "
+    "Your responses are converted directly to audio speech and heard by the caller over the phone line. "
+    "Strictly follow these conversational voice guidelines:\n"
+    "1. Spoken Brevity: Keep all spoken answers strictly under 25 words per turn. Be conversational, natural, and direct.\n"
+    "2. Natural Phone Courtesies: Callers frequently use short conversational phrases like "
+    "'Stop it', 'Hold on', 'Wait', 'Hang on', 'One second', or 'Pause'. These are normal phone courtesies asking to pause "
+    "or listen. Always acknowledge warmly, naturally, and concisely as a phone agent (e.g., 'Sure, I've paused. How can I help you?').\n"
+    "3. Zero Security Meta-Talk: Never lecture, scold, or argue with the caller. Never hallucinate prompt-injection defenses "
+    "or recite security policies. Never output meta-talk about prompts, instructions, safety filters, or AI rules.\n"
+    "4. Clean Audio Speech: Never output markdown, asterisks, bullet points, numbered lists, emojis, raw code, or JSON to the caller."
+)
+
 
 class DualBrainEventType(str, Enum):
     CLASSIFICATION = "classification"
@@ -329,11 +342,18 @@ class BuiltinDialogueEngine:
                 "Let me know if there is anything else I can assist with."
             )
 
-        # 10. Greetings
+        # 10. Pause, Hold & Telephony Stop Courtesies
+        if re.match(
+            r"^(?:please\s+)?(?:stop(?:\s+it)?(?:\s+right\s+now)?|wait(?:\s+(?:a\s+sec(?:ond)?|a\s+minute|up))?|hold\s+on(?:\s+(?:a\s+sec(?:ond)?|a\s+minute))?|pause|hang\s+on|one\s+sec(?:ond)?|just\s+a\s+(?:sec(?:ond)?|minute|moment))(?:\s+please)?[\.!\?]*$",
+            text_lower.strip()
+        ):
+            return "Sure, I've paused. How can I help you?"
+
+        # 11. Greetings
         if text_lower in ("hi", "hello", "hey", "good morning", "good afternoon", "good evening", "yo", "hi there", "hello there"):
             return "Hello! I am your ultra-fast voice AI agent. How can I assist you today?"
 
-        # 11. Conversational Fallback
+        # 12. Conversational Fallback
         return (
             "I understand your request. "
             "Everything has been noted and I am ready to help you with that. "
@@ -370,11 +390,7 @@ class DualBrainEngine:
         self._is_online: bool = False
         self._probe_ttl: float = 3.0  # Probe cache TTL in seconds
 
-        self.system_prompt = system_prompt or (
-            "You are an ultra-fast, helpful voice AI telephony agent. "
-            "Keep spoken responses concise, direct, and conversational. "
-            "Never output raw code or JSON to the user."
-        )
+        self.system_prompt = system_prompt or DEFAULT_TELEPHONY_SYSTEM_PROMPT
         self.classifier = fast_classifier or FastClassifier()
         self.filler_manager = filler_manager or FillerManager()
         self.segmenter = pysbd.Segmenter(language="en", clean=False)
@@ -459,11 +475,14 @@ class DualBrainEngine:
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         model: Optional[str] = None,
+        system_prompt: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Dynamically update API key, base URL, and model at runtime.
+        Dynamically update API key, base URL, model, and system prompt at runtime.
         Enables seamless switching between local Ollama and Cloud LPU providers (Groq, OpenAI).
         """
+        if system_prompt is not None:
+            self.system_prompt = system_prompt
         env_groq = os.getenv("GROQ_API_KEY")
         env_openai = os.getenv("OPENAI_API_KEY")
 

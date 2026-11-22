@@ -6,6 +6,7 @@ Validation Tests for Audio DSP & Speech Streaming Specialist Fixes:
 4. Equal-power sine/cosine crossfade RMS continuity.
 """
 
+import asyncio
 import os
 import sys
 import time
@@ -122,6 +123,53 @@ class TestAudioDSPFixes(unittest.TestCase):
         seam_region = crossfaded[seam_start : seam_start + fade_samples]
         seam_rms = float(np.sqrt(np.mean(seam_region ** 2)))
         self.assertGreater(seam_rms, 0.25, "Seam RMS dropped excessively during crossfade!")
+
+    def test_adaptive_flow_control_outbound_worker(self):
+        """Validates adaptive flow control in _outbound_stream_worker for Web clients."""
+        async def run_test():
+            class MockWS:
+                def __init__(self):
+                    self.sent_bytes = []
+                    self.sent_json = []
+
+                async def send_bytes(self, b):
+                    self.sent_bytes.append(b)
+
+                async def send_json(self, j):
+                    self.sent_json.append(j)
+
+            mock_ws = MockWS()
+            session = CallSession(websocket=mock_ws, mode="web")
+
+            # Push 600ms of audio (9600 samples at 16kHz) = 6 frames of 100ms
+            chunk = 0.2 * np.ones(9600, dtype=np.float32)
+            session.crossfade_buffer.write_chunk(chunk)
+
+            # Start worker task
+            worker_task = asyncio.create_task(session._outbound_stream_worker())
+
+            # Yield control to let worker process frames
+            # With minimal yield (sleep(0.005)), initial frames are pushed rapidly
+            # so the client gets a safe lead buffer (~200ms) without starvation
+            await asyncio.sleep(0.12)
+
+            self.assertTrue(session.tts_playing)
+            self.assertTrue(any(j.get("event") == "tts_start" for j in mock_ws.sent_json))
+            self.assertGreaterEqual(len(mock_ws.sent_bytes), 2)
+
+            # Each frame should be 1600 samples * 2 bytes = 3200 bytes
+            for frame_bytes in mock_ws.sent_bytes:
+                self.assertLessEqual(len(frame_bytes), 3200)
+
+            # Clean up
+            await session.close()
+            worker_task.cancel()
+            try:
+                await worker_task
+            except asyncio.CancelledError:
+                pass
+
+        asyncio.run(run_test())
 
 
 if __name__ == "__main__":

@@ -3,10 +3,13 @@ Echo Canceller & Inbound Audio Processor for Ultra-Low Latency Telephony.
 Implements:
 1. EchoReferenceTap: Circular ring buffer storing outbound synthesized audio frames.
 2. InboundAudioProcessor / EchoCanceller:
-   - Rolling reference of outbound audio with estimated round-trip delay (40ms-120ms).
+   - Rolling reference of outbound audio with estimated round-trip delay (25ms-350ms).
    - Energy subtraction and cross-correlation estimation to cancel acoustic echo on speakerphones.
+   - Double-talk detection: distinguishes between pure speaker echo and true caller voice.
    - Distinguishes between backchanneling sounds ("uh-huh", "yeah", "mhm" < 350ms, low energy)
-     vs true barge-in / interruption ("wait stop", "no", continuous speech > 300ms).
+     vs true barge-in / interruption ("stop", "wait", "hold on", continuous speech >= 350ms).
+   - Enforces 450ms holdoff at the start of any TTS utterance to eliminate speakerphone onset transients.
+   - Immediate sub-50ms cutoff without dropping caller audio.
    - Exposes `should_interrupt(inbound_pcm) -> bool`.
 """
 
@@ -79,6 +82,7 @@ class EchoReferenceTap:
         self._lock = threading.Lock()
         self._last_push_time = 0.0
         self._active_outbound = False
+        self._utterance_start_time = 0.0
 
     @property
     def total_samples_written(self) -> int:
@@ -87,6 +91,10 @@ class EchoReferenceTap:
     @property
     def last_push_time(self) -> float:
         return self._last_push_time
+
+    @property
+    def utterance_start_time(self) -> float:
+        return self._utterance_start_time
 
     def is_speaking(self, window_ms: float = 250.0, energy_thresh: float = 0.005) -> bool:
         """
@@ -112,6 +120,30 @@ class EchoReferenceTap:
         rms = float(np.sqrt(np.mean(recent_data ** 2)))
         return rms > energy_thresh
 
+    def _internal_write(self, samples: np.ndarray) -> None:
+        n = len(samples)
+        if n == 0:
+            return
+        if n >= self.buffer_size:
+            # If chunk is larger than buffer, take only the most recent part
+            self._buffer[:] = samples[-self.buffer_size:]
+            self._write_pos = 0
+            self._total_samples_written += n
+            return
+
+        end_pos = self._write_pos + n
+        if end_pos <= self.buffer_size:
+            self._buffer[self._write_pos:end_pos] = samples
+            self._write_pos = end_pos % self.buffer_size
+        else:
+            first_part = self.buffer_size - self._write_pos
+            self._buffer[self._write_pos:] = samples[:first_part]
+            second_part = n - first_part
+            self._buffer[:second_part] = samples[first_part:]
+            self._write_pos = second_part
+
+        self._total_samples_written += n
+
     def push_reference(
         self,
         pcm_data: Union[np.ndarray, bytes],
@@ -120,6 +152,8 @@ class EchoReferenceTap:
         """
         Pushes an outbound audio chunk into the circular buffer.
         Automatically converts to float32 mono at self.sample_rate.
+        Pads silence if there is a gap in real-time streaming to keep the
+        circular buffer strictly synchronized with wall-clock time.
         """
         in_rate = sample_rate or self.sample_rate
         samples = ensure_float32(pcm_data, source_rate=in_rate, target_rate=self.sample_rate)
@@ -128,28 +162,22 @@ class EchoReferenceTap:
             return
 
         with self._lock:
-            self._last_push_time = time.time()
+            now = time.time()
+            # If gap between audio pushes is greater than 50ms, pad silence to keep ring buffer aligned
+            if self._last_push_time > 0:
+                gap_sec = now - self._last_push_time
+                if gap_sec > 0.05:
+                    gap_samples = min(int(round(gap_sec * self.sample_rate)), self.buffer_size)
+                    if gap_samples > 0:
+                        self._internal_write(np.zeros(gap_samples, dtype=np.float32))
+
+            # Detect new utterance start after pause > 100ms
+            if self._last_push_time == 0.0 or (now - self._last_push_time > 0.10):
+                self._utterance_start_time = now
+
+            self._last_push_time = now
             self._active_outbound = True
-
-            if n >= self.buffer_size:
-                # If chunk is larger than buffer, take only the most recent part
-                self._buffer[:] = samples[-self.buffer_size:]
-                self._write_pos = 0
-                self._total_samples_written += n
-                return
-
-            end_pos = self._write_pos + n
-            if end_pos <= self.buffer_size:
-                self._buffer[self._write_pos:end_pos] = samples
-                self._write_pos = end_pos % self.buffer_size
-            else:
-                first_part = self.buffer_size - self._write_pos
-                self._buffer[self._write_pos:] = samples[:first_part]
-                second_part = n - first_part
-                self._buffer[:second_part] = samples[first_part:]
-                self._write_pos = second_part
-
-            self._total_samples_written += n
+            self._internal_write(samples)
 
     def get_delayed_reference(
         self,
@@ -158,6 +186,7 @@ class EchoReferenceTap:
     ) -> np.ndarray:
         """
         Retrieves reference audio slice aligned with propagation delay.
+        Always returns an array of length num_samples (zero-padded if unwritten history).
         """
         delay_samples = int(round(delay_ms * self.sample_rate / 1000.0))
         num_samples = min(num_samples, self.buffer_size - delay_samples)
@@ -165,13 +194,23 @@ class EchoReferenceTap:
             return np.zeros(0, dtype=np.float32)
 
         with self._lock:
-            if self._total_samples_written < (delay_samples + num_samples):
-                # Not enough history written yet
+            if self._total_samples_written == 0:
                 return np.zeros(num_samples, dtype=np.float32)
 
             start_idx = self._write_pos - delay_samples - num_samples
             idx = np.arange(start_idx, start_idx + num_samples) % self.buffer_size
-            return self._buffer[idx].copy()
+            res = self._buffer[idx].copy()
+
+            # If total samples written is less than history needed, zero out the unwritten past
+            needed_history = delay_samples + num_samples
+            if self._total_samples_written < needed_history:
+                unwritten_samples = needed_history - self._total_samples_written
+                if unwritten_samples >= num_samples:
+                    res.fill(0.0)
+                else:
+                    res[:unwritten_samples] = 0.0
+
+            return res
 
     def clear(self) -> None:
         """
@@ -183,6 +222,7 @@ class EchoReferenceTap:
             self._total_samples_written = 0
             self._last_push_time = 0.0
             self._active_outbound = False
+            self._utterance_start_time = 0.0
 
 
 @dataclass
@@ -202,10 +242,12 @@ class ProcessingMetrics:
 class InboundAudioProcessor:
     """
     Inbound Audio Processor with Acoustic Echo Cancellation & Barge-In Classifier.
-    - Estimates round-trip propagation delay (40ms-120ms typical for PSTN/WebRTC).
+    - Estimates round-trip propagation delay (25ms-350ms typical for PSTN/WebRTC).
     - Energy subtraction and cross-correlation estimation to cancel speakerphone acoustic echo.
+    - Double-talk detection: distinguishes between pure speaker echo and true caller voice.
     - Distinguishes between backchanneling sounds ("uh-huh", "yeah", "mhm" < 350ms, low energy)
-      vs true barge-in / interruption ("wait stop", "no", continuous speech > 300ms).
+      vs true barge-in / interruption ("stop", "wait", "hold on", continuous speech >= 350ms).
+    - Enforces 450ms holdoff at the start of any TTS utterance.
     - Exposes should_interrupt(inbound_pcm) -> bool.
     """
 
@@ -213,15 +255,16 @@ class InboundAudioProcessor:
         self,
         echo_tap: Optional[EchoReferenceTap] = None,
         sample_rate: int = 16000,
-        min_delay_ms: float = 30.0,
+        min_delay_ms: float = 25.0,
         max_delay_ms: float = 350.0,
-        initial_delay_ms: float = 80.0,
+        initial_delay_ms: float = 60.0,
+        barge_in_holdoff_ms: float = 0.0,
         backchannel_max_duration_ms: float = 350.0,
         backchannel_max_energy: float = 0.075,
         barge_in_min_duration_ms: float = 350.0,
-        speech_energy_threshold: float = 0.040,
-        barge_in_urgent_energy: float = 0.22,
-        echo_correlation_threshold: float = 0.40,
+        speech_energy_threshold: float = 0.035,
+        barge_in_urgent_energy: float = 0.14,
+        echo_correlation_threshold: float = 0.35,
         echo_subtraction_factor: float = 1.0,
     ):
         self.sample_rate = sample_rate
@@ -231,6 +274,7 @@ class InboundAudioProcessor:
         self.estimated_delay_ms = initial_delay_ms
 
         # Thresholds
+        self.barge_in_holdoff_ms = barge_in_holdoff_ms
         self.backchannel_max_duration_ms = backchannel_max_duration_ms
         self.backchannel_max_energy = backchannel_max_energy
         self.barge_in_min_duration_ms = barge_in_min_duration_ms
@@ -246,11 +290,23 @@ class InboundAudioProcessor:
         self._burst_avg_energy_sum = 0.0
         self._burst_frame_count = 0
         self._interrupted = False
+        self._utterance_start_time = 0.0
+        self._delay_locked = False
         self._last_process_time = time.time()
 
         # Rolling delay alignment history
         self._delay_history: deque[float] = deque(maxlen=20)
         self._delay_history.append(initial_delay_ms)
+
+    def notify_utterance_start(self, timestamp: Optional[float] = None) -> None:
+        """Notifies the processor that a new outbound TTS utterance has started."""
+        self._utterance_start_time = timestamp or time.time()
+        self._speech_duration_ms = 0.0
+        self._silence_duration_ms = 0.0
+        self._burst_frame_count = 0
+        self._burst_avg_energy_sum = 0.0
+        self._burst_peak_energy = 0.0
+        self._interrupted = False
 
     def reset_state(self) -> None:
         """Resets speech duration and barge-in tracking state."""
@@ -277,7 +333,7 @@ class InboundAudioProcessor:
         min_lag = int(round(self.min_delay_ms * self.sample_rate / 1000.0))
         max_lag = int(round(self.max_delay_ms * self.sample_rate / 1000.0))
 
-        # Retrieve reference window covering the max possible delay + chunk length
+        # Retrieve reference window covering max possible delay + chunk length
         total_fetch = max_lag + num_samples
         ref_window = self.echo_tap.get_delayed_reference(
             num_samples=total_fetch,
@@ -299,35 +355,61 @@ class InboundAudioProcessor:
             return 0.0, self.estimated_delay_ms, np.zeros(num_samples, dtype=np.float32)
         in_norm = in_norm / in_std
 
-        # Sweep candidate delays with a step of 4 samples (~0.25ms at 16kHz) for efficiency
         step = 4
         best_corr = -1.0
         best_lag = min_lag
 
-        for lag in range(min_lag, max_lag, step):
-            # The reference slice that would have arrived after propagation lag
-            ref_slice = ref_window[lag:lag + num_samples]
-            if len(ref_slice) < num_samples:
-                continue
+        # Adaptive search: check neighborhood around locked delay first for speed & stability
+        check_global = True
+        if self._delay_locked and self.estimated_delay_ms > 0:
+            est_lag = int(round(self.estimated_delay_ms * self.sample_rate / 1000.0))
+            local_min = max(min_lag, est_lag - int(0.015 * self.sample_rate))
+            local_max = min(max_lag, est_lag + int(0.015 * self.sample_rate))
+            for lag in range(local_min, local_max, 2):
+                start_idx = total_fetch - lag - num_samples
+                if start_idx < 0:
+                    continue
+                ref_slice = ref_window[start_idx:start_idx + num_samples]
+                ref_std = float(np.std(ref_slice))
+                if ref_std < 1e-5:
+                    continue
+                ref_norm = (ref_slice - np.mean(ref_slice)) / ref_std
+                corr = float(np.dot(in_norm, ref_norm) / num_samples)
+                if corr > best_corr:
+                    best_corr = corr
+                    best_lag = lag
+            if best_corr >= 0.50:
+                check_global = False
 
-            ref_std = float(np.std(ref_slice))
-            if ref_std < 1e-5:
-                continue
+        if check_global:
+            for lag in range(min_lag, max_lag, step):
+                start_idx = total_fetch - lag - num_samples
+                if start_idx < 0:
+                    continue
+                ref_slice = ref_window[start_idx:start_idx + num_samples]
+                if len(ref_slice) < num_samples:
+                    continue
 
-            ref_norm = (ref_slice - np.mean(ref_slice)) / ref_std
-            # Normalized cross-correlation
-            corr = float(np.dot(in_norm, ref_norm) / num_samples)
-            if corr > best_corr:
-                best_corr = corr
-                best_lag = lag
+                ref_std = float(np.std(ref_slice))
+                if ref_std < 1e-5:
+                    continue
+
+                ref_norm = (ref_slice - np.mean(ref_slice)) / ref_std
+                # Normalized cross-correlation
+                corr = float(np.dot(in_norm, ref_norm) / num_samples)
+                if corr > best_corr:
+                    best_corr = corr
+                    best_lag = lag
 
         best_delay_ms = (best_lag * 1000.0) / self.sample_rate
-        best_slice = ref_window[best_lag:best_lag + num_samples]
+        best_start = total_fetch - best_lag - num_samples
+        best_slice = ref_window[best_start:best_start + num_samples] if best_start >= 0 else np.zeros(num_samples, dtype=np.float32)
 
         # Update rolling smoothed delay if correlation is confident
-        if best_corr > 0.45:
+        if best_corr >= 0.40:
             self._delay_history.append(best_delay_ms)
             self.estimated_delay_ms = float(np.median(self._delay_history))
+            self._delay_locked = True
 
         return max(0.0, best_corr), best_delay_ms, best_slice
 
@@ -339,6 +421,7 @@ class InboundAudioProcessor:
     ) -> Tuple[np.ndarray, bool]:
         """
         Applies energy subtraction and echo attenuation based on cross-correlation.
+        Distinguishes between pure acoustic echo and double-talk (caller interruption).
         Returns (cleaned_audio, is_echo).
         """
         in_rms = float(np.sqrt(np.mean(inbound ** 2)))
@@ -347,38 +430,48 @@ class InboundAudioProcessor:
         if in_rms < 1e-4 or ref_rms < 1e-4:
             return inbound, False
 
-        # If correlation is high, incoming sound is overwhelmingly acoustic echo
-        is_echo = correlation >= self.echo_correlation_threshold
-
-        if not is_echo:
-            # Low correlation: return inbound with no attenuation
-            return inbound, False
-
         # Compute scaling factor alpha via projection: alpha = cov(inbound, ref) / var(ref)
         ref_var = float(np.var(ref_slice))
         if ref_var > 1e-5:
             alpha = float(np.dot(inbound, ref_slice) / (len(inbound) * ref_var))
-            alpha = max(0.0, min(alpha * self.echo_subtraction_factor, 1.5))
+            alpha = max(0.0, min(alpha * self.echo_subtraction_factor, 2.0))
         else:
             alpha = correlation * (in_rms / ref_rms)
 
         # Time-domain subtraction
         echo_est = alpha * ref_slice
         subtracted = inbound - echo_est
-
-        # Residual energy calculation
         sub_rms = float(np.sqrt(np.mean(subtracted ** 2)))
 
-        # Suppression gain: suppress aggressively if correlation is very high (>0.6)
-        if correlation > 0.65:
-            suppression_gain = 0.05
-        elif correlation > 0.50:
-            suppression_gain = 0.15
-        else:
-            suppression_gain = max(0.2, 1.0 - correlation)
+        erle_ratio = sub_rms / (in_rms + 1e-6)
 
-        cleaned = subtracted * suppression_gain
-        return cleaned, True
+        # Double-talk detection:
+        # Caller is speaking over echo if residual energy is high (sub_rms >= 0.045)
+        # and subtraction failed to remove most energy (erle_ratio >= 0.40)
+        is_double_talk = (sub_rms >= 0.045 and erle_ratio >= 0.40 and in_rms >= self.speech_energy_threshold)
+
+        # Acoustic Echo classification:
+        # It is pure echo if correlation is above threshold AND not double-talk,
+        # OR if subtraction effectively eliminated the energy (erle_ratio < 0.30).
+        is_echo = (correlation >= self.echo_correlation_threshold or erle_ratio < 0.30) and not is_double_talk
+
+        if is_echo:
+            # Pure echo: suppress residual leakage aggressively so mic doesn't hear echo
+            if correlation > 0.60 or erle_ratio < 0.15:
+                suppression_gain = 0.03
+            elif correlation > 0.45 or erle_ratio < 0.25:
+                suppression_gain = 0.08
+            else:
+                suppression_gain = 0.18
+            cleaned = subtracted * suppression_gain
+            return cleaned, True
+        else:
+            if is_double_talk:
+                # Keep echo-subtracted signal so human caller's voice is preserved without bot echo
+                cleaned = subtracted
+            else:
+                cleaned = inbound
+            return cleaned, False
 
     def process_frame(
         self,
@@ -389,7 +482,9 @@ class InboundAudioProcessor:
         Processes an inbound audio chunk:
         - Resamples to 16kHz float32.
         - Calculates echo correlation and cancels acoustic echo.
+        - Distinguishes double-talk vs pure echo.
         - Classifies backchannel vs true barge-in interruption.
+        - Respects barge-in hold-off at utterance onset.
         Returns:
             (cleaned_pcm_float32, should_interrupt, metrics)
         """
@@ -424,13 +519,20 @@ class InboundAudioProcessor:
         cleaned_rms = float(np.sqrt(np.mean(cleaned ** 2)))
 
         # Speech activity evaluation on echo-cleaned audio
-        # If echo cancellation determined this was echo, speech power is suppressed
         is_speech = (cleaned_rms >= self.speech_energy_threshold) and not is_echo
+
+        # Check utterance onset hold-off
+        in_holdoff = False
+        if bot_is_speaking and self.barge_in_holdoff_ms > 0:
+            elapsed_ms = (time.time() - self._utterance_start_time) * 1000.0 if self._utterance_start_time > 0 else 9999.0
+            outbound_dur_ms = (self.echo_tap.total_samples_written * 1000.0) / self.sample_rate
+            if elapsed_ms < self.barge_in_holdoff_ms or outbound_dur_ms < self.barge_in_holdoff_ms:
+                in_holdoff = True
 
         is_backchannel = False
         is_barge_in = False
 
-        if bot_is_speaking:
+        if bot_is_speaking and not in_holdoff:
             if is_speech:
                 self._speech_duration_ms += frame_duration_ms
                 self._silence_duration_ms = 0.0
@@ -441,37 +543,40 @@ class InboundAudioProcessor:
 
                 avg_energy = self._burst_avg_energy_sum / max(1, self._burst_frame_count)
 
-                # Condition 1: Continuous speech exceeding barge_in_min_duration_ms (>300ms)
+                # Condition 1: Continuous speech exceeding barge_in_min_duration_ms (>= 350ms)
                 if self._speech_duration_ms >= self.barge_in_min_duration_ms:
                     is_barge_in = True
                     self._interrupted = True
 
-                # Condition 2: Urgent loud barge-in ("STOP!", "NO!", "WAIT!")
-                elif self._speech_duration_ms >= 140.0 and self._burst_peak_energy >= self.barge_in_urgent_energy:
+                # Condition 2: Urgent loud barge-in ("STOP!", "NO!", "WAIT!", "HOLD ON!")
+                # caller saying 'stop', 'wait', 'hold on' (>= 140ms and elevated energy)
+                elif self._speech_duration_ms >= 140.0 and (
+                    self._burst_peak_energy >= self.barge_in_urgent_energy or avg_energy >= 0.11
+                ):
                     is_barge_in = True
                     self._interrupted = True
 
             else:
                 self._silence_duration_ms += frame_duration_ms
 
-                # If speech was present and has now fallen silent:
-                if self._silence_duration_ms >= 150.0 and self._speech_duration_ms > 0:
-                    avg_energy = self._burst_avg_energy_sum / max(1, self._burst_frame_count)
+                # If silence exceeds 80ms, reset speech tracking so non-consecutive frames don't accumulate
+                if self._silence_duration_ms >= 80.0:
+                    if self._speech_duration_ms > 0:
+                        avg_energy = self._burst_avg_energy_sum / max(1, self._burst_frame_count)
+                        if (
+                            self._speech_duration_ms < self.backchannel_max_duration_ms
+                            and avg_energy <= self.backchannel_max_energy
+                            and not self._interrupted
+                        ):
+                            is_backchannel = True
 
-                    # Backchannel check: brief duration (< 350ms) and low-to-moderate energy
-                    if (self._speech_duration_ms < self.backchannel_max_duration_ms and
-                            avg_energy <= self.backchannel_max_energy and
-                            not self._interrupted):
-                        is_backchannel = True
-
-                    # Reset speech tracking for next burst
                     self._speech_duration_ms = 0.0
                     self._burst_frame_count = 0
                     self._burst_avg_energy_sum = 0.0
                     self._burst_peak_energy = 0.0
                     self._interrupted = False
         else:
-            # Bot is NOT speaking: reset barge-in tracking
+            # Bot is NOT speaking or in hold-off: reset speech tracking
             self._speech_duration_ms = 0.0
             self._silence_duration_ms = 0.0
             self._burst_frame_count = 0
