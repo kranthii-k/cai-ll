@@ -765,7 +765,7 @@
         let jitterSamplesCount = 0;
         let flushTimer = null;
         const MIN_BUFFER_SAMPLES = 800; // ~50ms accumulator threshold to smooth micro-chunks
-        const INITIAL_BUFFER_DELAY_SEC = 0.08; // 80ms cushion against network/timer jitter
+        const INITIAL_BUFFER_DELAY_SEC = 0.03; // 30ms tight cushion for fresh turn startup
 
         const TARGET_SAMPLE_RATE = 16000;
 
@@ -978,8 +978,8 @@
                 stanceIndicator.innerText = `Stance: ${msg.stance.toUpperCase()} (${msg.latency_ms.toFixed(1)}ms)`;
             }
             else if (msg.event === "filler_start" || msg.event === "tts_start") {
-                if (audioContext && nextPlayTime < audioContext.currentTime) {
-                    nextPlayTime = audioContext.currentTime + 0.04;
+                if (audioContext && scheduledAudioSources.length === 0) {
+                    nextPlayTime = audioContext.currentTime + 0.03;
                 }
                 if (msg.event === "filler_start") {
                     valTimeToFiller.innerText = `${msg.time_to_filler_ms} ms`;
@@ -1055,11 +1055,15 @@
 
             const now = audioContext.currentTime;
 
-            // Continuous timeline scheduling:
-            // If nextPlayTime has fallen behind now (playback ran dry or is starting),
-            // schedule with an initial buffer cushion (80ms) so network/timer jitter never starves playback
+            // Continuous seamless timeline scheduling:
+            // - If audio was already active or recently finished (<200ms), connect IMMEDIATELY without injecting silent pause gaps!
+            // - Only when starting from a dead stop, add a tight 30ms cushion.
             if (nextPlayTime < now) {
-                nextPlayTime = now + INITIAL_BUFFER_DELAY_SEC;
+                if (scheduledAudioSources.length > 0 || (now - nextPlayTime < 0.20)) {
+                    nextPlayTime = now;
+                } else {
+                    nextPlayTime = now + 0.03;
+                }
             }
 
             source.start(nextPlayTime);

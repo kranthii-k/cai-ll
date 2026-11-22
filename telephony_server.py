@@ -236,11 +236,33 @@ async def transcribe_speech(speech_data: np.ndarray) -> str:
     return ""
 
 
-def split_sentence_into_clauses(text: str, max_words: int = 7) -> List[str]:
+def trim_audio_silence(
+    audio: np.ndarray,
+    threshold: float = 0.005,
+    pad_ms: float = 12.0,
+    sr: int = 24000
+) -> np.ndarray:
+    """
+    Trims Kokoro's padded silence (typically 150-350ms of dead zeros at head & tail)
+    while preserving a smooth 12ms acoustic breathing envelope.
+    Prevents choppy gaps and broken prosody between sentences.
+    """
+    if len(audio) == 0:
+        return audio
+    pad_samples = int(sr * (pad_ms / 1000.0))
+    is_speech = np.abs(audio) > threshold
+    if not np.any(is_speech):
+        return audio
+    start = max(0, int(np.argmax(is_speech)) - pad_samples)
+    end = min(len(audio), len(audio) - int(np.argmax(is_speech[::-1])) + pad_samples)
+    return audio[start:end]
+
+
+def split_sentence_into_clauses(text: str, max_words: int = 12) -> List[str]:
     """
     Sub-sentence clause segmentation for real-time TTS pipelining.
-    Allows Kokoro to start synthesizing 4-5 word phrases (~200ms) immediately,
-    streaming audio continuously while subsequent clauses are synthesized.
+    Sentences under 12 words are kept whole to preserve optimal neural prosody.
+    Long complex sentences (>12 words) are split on major punctuation boundaries.
     """
     words = text.split()
     if len(words) <= max_words:
@@ -251,7 +273,7 @@ def split_sentence_into_clauses(text: str, max_words: int = 7) -> List[str]:
     current = ""
     for part in clauses:
         current += part
-        if len(current.split()) >= 4 and any(current.rstrip().endswith(p) for p in [',', ';', ':', '—', '–', '\n']):
+        if len(current.split()) >= 6 and any(current.rstrip().endswith(p) for p in [',', ';', ':', '—', '–', '\n']):
             chunks.append(current.strip())
             current = ""
     if current.strip():
@@ -633,6 +655,9 @@ class CallSession:
                                 samples, sr = await asyncio.to_thread(
                                     registry.kokoro.create, clause, voice="af_heart", speed=1.05, lang="en-us"
                                 )
+                                # Trim Kokoro's dead silence (removes 150-350ms silence at head & tail)
+                                samples = trim_audio_silence(samples, threshold=0.005, pad_ms=12.0, sr=sr)
+
                                 # Kokoro is 24kHz -> resample to 16kHz using high-quality polyphase FIR / soxr
                                 if sr == 24000:
                                     pcm_16k = resample_24k_to_16k(samples)
@@ -650,7 +675,7 @@ class CallSession:
                                 ttfa_ms = (time.time() - turn_start) * 1000.0
 
                             # Write each clause immediately into CrossfadeBuffer so audio playback begins instantly!
-                            self.crossfade_buffer.write_chunk(pcm_16k, crossfade=True, crossfade_ms=30.0)
+                            self.crossfade_buffer.write_chunk(pcm_16k, crossfade=True, crossfade_ms=25.0)
 
                         # Send sentence transcript & metrics to client
                         await self.send_json_safe({
@@ -677,13 +702,14 @@ class CallSession:
                     samples, sr = await asyncio.to_thread(
                         registry.kokoro.create, fallback_text, voice="af_heart", speed=1.05, lang="en-us"
                     )
+                    samples = trim_audio_silence(samples, threshold=0.005, pad_ms=12.0, sr=sr)
                     if sr == 24000:
                         pcm_16k = resample_24k_to_16k(samples)
                     elif sr != 16000:
                         pcm_16k = resample_audio(samples, sr, 16000)
                     else:
                         pcm_16k = samples.astype(np.float32)
-                    self.crossfade_buffer.write_chunk(pcm_16k, crossfade=True, crossfade_ms=30.0)
+                    self.crossfade_buffer.write_chunk(pcm_16k, crossfade=True, crossfade_ms=25.0)
                 except Exception:
                     pass
             if ttfa_ms is None:
@@ -762,11 +788,14 @@ class CallSession:
                 elif self.mode == "web":
                     int16_bytes = (np.clip(frame_16k, -1.0, 1.0) * 32767.0).astype(np.int16).tobytes()
                     await self.websocket.send_bytes(int16_bytes)
-                    # Web streaming pacing: deliver with slight lead (~80% frame duration)
-                    # so client jitter buffer stays comfortably populated without sleep jitter starvation
-                    frame_dur = len(frame_16k) / 16000.0
-                    sleep_dur = max(0.01, frame_dur * 0.8)
-                    await asyncio.sleep(sleep_dur)
+                    # Adaptive Web streaming pacing:
+                    # Keep client audio queue comfortably primed without sleep timer starvation
+                    rem_ms = self.crossfade_buffer.remaining_duration_ms
+                    if rem_ms > 400.0:
+                        frame_dur = len(frame_16k) / 16000.0
+                        await asyncio.sleep(frame_dur * 0.4)
+                    else:
+                        await asyncio.sleep(0.008)
 
             except asyncio.CancelledError:
                 break
