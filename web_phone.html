@@ -855,8 +855,8 @@
                 try {
                     micStream = await navigator.mediaDevices.getUserMedia({
                         audio: {
-                            echoCancellation: false,
-                            noiseSuppression: false,
+                            echoCancellation: true,
+                            noiseSuppression: true,
                             autoGainControl: true,
                             channelCount: 1
                         },
@@ -977,8 +977,13 @@
             else if (msg.event === "classification") {
                 stanceIndicator.innerText = `Stance: ${msg.stance.toUpperCase()} (${msg.latency_ms.toFixed(1)}ms)`;
             }
-            else if (msg.event === "filler_start") {
-                valTimeToFiller.innerText = `${msg.time_to_filler_ms} ms`;
+            else if (msg.event === "filler_start" || msg.event === "tts_start") {
+                if (audioContext && nextPlayTime < audioContext.currentTime) {
+                    nextPlayTime = audioContext.currentTime + 0.04;
+                }
+                if (msg.event === "filler_start") {
+                    valTimeToFiller.innerText = `${msg.time_to_filler_ms} ms`;
+                }
             }
             else if (msg.event === "transcript") {
                 appendTranscriptMessage(msg.role, msg.text, msg.is_filler, msg.stance);

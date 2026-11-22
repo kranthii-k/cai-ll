@@ -41,8 +41,8 @@ STANCE_REGISTRY: Dict[ConversationalStance, StanceMetadata] = {
     ConversationalStance.AFFIRMATIVE: StanceMetadata(
         stance=ConversationalStance.AFFIRMATIVE,
         recommended_filler_key="affirmative",
-        expected_delay_ms=100,
-        latency_masking_required=False,
+        expected_delay_ms=250,
+        latency_masking_required=True,
         description="Acknowledgement, confirmation, or closure acknowledging user input with minimal delay."
     ),
     ConversationalStance.EMPATHETIC: StanceMetadata(
@@ -62,8 +62,8 @@ STANCE_REGISTRY: Dict[ConversationalStance, StanceMetadata] = {
     ConversationalStance.DIRECT: StanceMetadata(
         stance=ConversationalStance.DIRECT,
         recommended_filler_key="direct",
-        expected_delay_ms=0,
-        latency_masking_required=False,
+        expected_delay_ms=300,
+        latency_masking_required=True,
         description="Greetings, one/two-word utterances, or immediate answers requiring zero-lag response."
     ),
 }

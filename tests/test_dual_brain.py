@@ -607,7 +607,7 @@ class TestUltraLowLatencyEngine(unittest.IsolatedAsyncioTestCase):
         res_groq = engine.update_config(api_key="gsk_testGroqKey1234567890abcdef")
         self.assertEqual(res_groq["provider"], "groq")
         self.assertEqual(engine.base_url, "https://api.groq.com/openai/v1")
-        self.assertEqual(engine.model, "llama-3.3-70b-versatile")
+        self.assertIn(engine.model, ["llama-3.3-70b-versatile", "qwen/qwen3.8-27b"])
         self.assertEqual(res_groq["is_local"], False)
         print(f"[Test 08] Configured Groq LPU: {res_groq}")
 

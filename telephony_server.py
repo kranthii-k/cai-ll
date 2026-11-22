@@ -20,15 +20,19 @@ from __future__ import annotations
 import asyncio
 import base64
 from collections import deque
+import io
 import json
 import logging
 import math
 import os
+import re
 import site
 import time
 import uuid
+import wave
 from typing import Dict, List, Optional, Tuple, Any
 
+import httpx
 import numpy as np
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -92,7 +96,7 @@ SAMPLE_RATE_KOKORO = 24000
 TWILIO_FRAME_SIZE = 160  # 20ms at 8kHz mu-law
 VAD_CHUNK_SAMPLES = 512  # 32ms at 16kHz
 VAD_SPEECH_THRESHOLD = 0.25
-SILENCE_TIMEOUT_MS = 320
+SILENCE_TIMEOUT_MS = 220  # Ultra-fast 220ms end-of-speech detection
 
 app = FastAPI(title="Telephony Streaming Audio Server")
 
@@ -114,6 +118,7 @@ class ModelRegistry:
     filler_manager: FillerManager = FillerManager(sample_rate=16000)
     dual_brain: Optional[DualBrainEngine] = None
     segmenter: pysbd.Segmenter = pysbd.Segmenter(language="en", clean=False)
+    groq_stt_client: Optional[AsyncOpenAI] = None
 
 
 registry = ModelRegistry()
@@ -140,10 +145,25 @@ def initialize_models():
         except Exception as e:
             logger.warning(f"Silero VAD fallback to energy detector: {e}")
 
+    # Cloud Whisper STT via Groq LPU (~250ms latency)
+    groq_key = os.getenv("GROQ_API_KEY")
+    if groq_key and registry.groq_stt_client is None:
+        try:
+            logger.info("Initializing Groq Cloud Whisper STT client...")
+            registry.groq_stt_client = AsyncOpenAI(
+                base_url="https://api.groq.com/openai/v1",
+                api_key=groq_key,
+                timeout=httpx.Timeout(4.0, connect=1.5),
+                max_retries=0
+            )
+        except Exception as e:
+            logger.warning(f"Groq STT client error: {e}")
+
+    # Local Whisper fallback: use tiny.en with int8 for ~330ms CPU execution (never blocks loop)
     if registry.whisper is None:
         try:
-            logger.info("Initializing Whisper Model (base.en)...")
-            registry.whisper = WhisperModel("base.en", device="cpu", compute_type="default", cpu_threads=4)
+            logger.info("Initializing Local Whisper Model (tiny.en, int8)...")
+            registry.whisper = WhisperModel("tiny.en", device="cpu", compute_type="int8", cpu_threads=4)
         except Exception as e:
             logger.warning(f"Whisper initialization warning: {e}")
 
@@ -158,6 +178,85 @@ def initialize_models():
 
 # Initialize models and dual_brain on module import
 initialize_models()
+
+
+# --- Speech-to-Text & Clause Chunking Helpers ---
+async def transcribe_speech(speech_data: np.ndarray) -> str:
+    """
+    Ultra-low latency STT pipeline:
+    1. Primary: Groq Cloud Whisper Large V3 Turbo (~250ms) if GROQ_API_KEY is available.
+    2. Fallback: Local Faster-Whisper tiny.en int8 (~330ms on CPU) wrapped in asyncio.to_thread.
+    Guarantees that the main asyncio loop is NEVER blocked.
+    """
+    if len(speech_data) == 0:
+        return ""
+
+    # Convert float32 [-1, 1] to WAV bytes in memory (<0.2ms)
+    audio_int16 = (np.clip(speech_data, -1.0, 1.0) * 32767.0).astype(np.int16)
+    wav_buf = io.BytesIO()
+    with wave.open(wav_buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(SAMPLE_RATE_VAD)
+        wf.writeframes(audio_int16.tobytes())
+    wav_bytes = wav_buf.getvalue()
+
+    # Step 1: Groq Cloud STT (Whisper Large V3 Turbo)
+    if registry.groq_stt_client is not None:
+        try:
+            audio_file = ("audio.wav", io.BytesIO(wav_bytes), "audio/wav")
+            res = await registry.groq_stt_client.audio.transcriptions.create(
+                file=audio_file,
+                model="whisper-large-v3-turbo",
+                language="en",
+                response_format="json"
+            )
+            text = (res.text or "").strip()
+            if text:
+                return text
+        except Exception as e:
+            logger.warning(f"Groq Cloud STT failover to local Whisper: {e}")
+
+    # Step 2: Local Whisper fallback (tiny.en, int8 on CPU in background thread)
+    if registry.whisper is not None:
+        def _transcribe():
+            segments, info = registry.whisper.transcribe(
+                speech_data,
+                beam_size=1,
+                vad_filter=False,
+                condition_on_previous_text=False
+            )
+            return " ".join([seg.text for seg in segments]).strip()
+
+        try:
+            return await asyncio.to_thread(_transcribe)
+        except Exception as e:
+            logger.error(f"Local Whisper transcription error: {e}")
+
+    return ""
+
+
+def split_sentence_into_clauses(text: str, max_words: int = 7) -> List[str]:
+    """
+    Sub-sentence clause segmentation for real-time TTS pipelining.
+    Allows Kokoro to start synthesizing 4-5 word phrases (~200ms) immediately,
+    streaming audio continuously while subsequent clauses are synthesized.
+    """
+    words = text.split()
+    if len(words) <= max_words:
+        return [text]
+
+    clauses = re.split(r'([,;:—–\n]+)', text)
+    chunks = []
+    current = ""
+    for part in clauses:
+        current += part
+        if len(current.split()) >= 4 and any(current.rstrip().endswith(p) for p in [',', ';', ':', '—', '–', '\n']):
+            chunks.append(current.strip())
+            current = ""
+    if current.strip():
+        chunks.append(current.strip())
+    return [c for c in chunks if c and any(ch.isalnum() for ch in c)]
 
 
 # --- Audio Conversion Helpers ---
@@ -226,15 +325,18 @@ class CallSession:
         self.echo_canceller = InboundAudioProcessor(
             echo_tap=self.echo_tap,
             sample_rate=16000,
-            min_delay_ms=40.0,
-            max_delay_ms=120.0,
-            barge_in_min_duration_ms=300.0,
+            min_delay_ms=30.0,
+            max_delay_ms=350.0,
+            barge_in_min_duration_ms=350.0,
+            speech_energy_threshold=0.040,
+            barge_in_urgent_energy=0.22,
             backchannel_max_duration_ms=350.0
         )
         self.crossfade_buffer = CrossfadeBuffer(sample_rate=16000, default_crossfade_ms=30.0)
 
         # State flags & background tasks
         self.tts_playing = False
+        self.tts_start_time: float = 0.0
         self.active_turn_id = 0
         self.current_tts_task: Optional[asyncio.Task] = None
         self.worker_tasks: List[asyncio.Task] = []
@@ -313,10 +415,13 @@ class CallSession:
         Inbound caller audio is processed through Echo Canceller.
         If true barge-in occurs, in-flight TTS is cancelled immediately,
         WITHOUT discarding caller's incoming speech!
+        Includes 450ms barge-in hold-off to prevent initial onset transients from interrupting.
         """
         cleaned_pcm, should_interrupt, metrics = self.echo_canceller.process_frame(pcm_16k)
 
-        if should_interrupt and self.tts_playing:
+        # Barge-in hold-off: don't allow barge-in in the first 450ms of speaking to prevent onset transients
+        barge_in_holdoff_ms = (time.time() - self.tts_start_time) * 1000.0 if self.tts_playing else 9999.0
+        if should_interrupt and self.tts_playing and barge_in_holdoff_ms > 450.0:
             await self.handle_barge_in()
 
         # Non-blocking enqueue for VAD processing
@@ -389,33 +494,26 @@ class CallSession:
                 logger.error(f"Error in vad_worker: {e}", exc_info=True)
 
     async def _stt_worker(self):
-        """Processes collected speech chunks with Whisper."""
+        """Processes collected speech chunks with Whisper asynchronously (Groq Cloud + local tiny.en int8 fallback)."""
         while self.is_connected:
             try:
                 speech_data = await self.speech_queue.get()
                 self.turn_start_time = time.time()
                 self.active_turn_id += 1
 
-                text = ""
-                if registry.whisper is not None:
-                    segments, info = registry.whisper.transcribe(
-                        speech_data,
-                        beam_size=1,
-                        vad_filter=False,
-                        condition_on_previous_text=False
-                    )
-                    text = " ".join([seg.text for seg in segments]).strip()
-                else:
-                    text = "Hello, can you help me with a question?"
+                t_stt_start = time.time()
+                text = await transcribe_speech(speech_data)
+                stt_duration_ms = (time.time() - t_stt_start) * 1000.0
 
                 if text:
-                    logger.info(f"🗣️ [{self.mode.upper()}] Caller: {text}")
+                    logger.info(f"🗣️ [{self.mode.upper()}] Caller ({stt_duration_ms:.1f}ms): {text}")
                     # Broadcast transcript to UI
                     await self.send_json_safe({
                         "event": "transcript",
                         "role": "caller",
                         "text": text,
-                        "timestamp": time.time()
+                        "timestamp": time.time(),
+                        "stt_latency_ms": round(stt_duration_ms, 1)
                     })
                     await self.text_queue.put(text)
 
@@ -523,29 +621,36 @@ class CallSession:
                         deep_sentences.append(sentence)
                         logger.info(f"🤖 Agent: {sentence}")
 
-                        # Synthesize TTS with Kokoro
-                        if registry.kokoro is not None:
-                            samples, sr = await asyncio.to_thread(
-                                registry.kokoro.create, sentence, voice="af_heart", speed=1.05, lang="en-us"
-                            )
-                            # Kokoro is 24kHz -> resample to 16kHz using high-quality polyphase FIR / soxr
-                            if sr == 24000:
-                                pcm_16k = resample_24k_to_16k(samples)
-                            elif sr != 16000:
-                                pcm_16k = resample_audio(samples, sr, 16000)
+                        # Real-time sub-sentence clause pipelining:
+                        # Synthesize short clauses (~200ms) and dispatch immediately to CrossfadeBuffer
+                        clauses = split_sentence_into_clauses(sentence)
+                        for clause in clauses:
+                            if turn_id != self.active_turn_id:
+                                return
+
+                            # Synthesize TTS with Kokoro
+                            if registry.kokoro is not None:
+                                samples, sr = await asyncio.to_thread(
+                                    registry.kokoro.create, clause, voice="af_heart", speed=1.05, lang="en-us"
+                                )
+                                # Kokoro is 24kHz -> resample to 16kHz using high-quality polyphase FIR / soxr
+                                if sr == 24000:
+                                    pcm_16k = resample_24k_to_16k(samples)
+                                elif sr != 16000:
+                                    pcm_16k = resample_audio(samples, sr, 16000)
+                                else:
+                                    pcm_16k = samples.astype(np.float32)
                             else:
-                                pcm_16k = samples.astype(np.float32)
-                        else:
-                            # Fallback tone for testing
-                            num_s = int(16000 * 0.4)
-                            t = np.linspace(0, 0.4, num_s, endpoint=False)
-                            pcm_16k = (0.2 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+                                # Fallback tone for testing
+                                num_s = int(16000 * 0.4)
+                                t = np.linspace(0, 0.4, num_s, endpoint=False)
+                                pcm_16k = (0.2 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
 
-                        if ttfa_ms is None:
-                            ttfa_ms = (time.time() - turn_start) * 1000.0
+                            if ttfa_ms is None:
+                                ttfa_ms = (time.time() - turn_start) * 1000.0
 
-                        # Write to CrossfadeBuffer (smooth equal-power crossfade with previous filler/sentence)
-                        self.crossfade_buffer.write_chunk(pcm_16k, crossfade=True, crossfade_ms=30.0)
+                            # Write each clause immediately into CrossfadeBuffer so audio playback begins instantly!
+                            self.crossfade_buffer.write_chunk(pcm_16k, crossfade=True, crossfade_ms=30.0)
 
                         # Send sentence transcript & metrics to client
                         await self.send_json_safe({
@@ -634,6 +739,7 @@ class CallSession:
 
                 if not self.tts_playing:
                     self.tts_playing = True
+                    self.tts_start_time = time.time()
                     if self.mode == "web":
                         await self.send_json_safe({"event": "tts_start"})
 

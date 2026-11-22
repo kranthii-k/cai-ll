@@ -149,6 +149,11 @@ class FillerManager:
             "Hmm, let's see...",
             "Right, so...",
         ],
+        "direct": [
+            "Hey there!",
+            "Hi, I'm here!",
+            "Hello, sure thing...",
+        ],
     }
 
     def __init__(

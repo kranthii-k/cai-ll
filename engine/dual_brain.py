@@ -471,15 +471,15 @@ class DualBrainEngine:
 
         if key and key.startswith("gsk_"):
             # Groq LPU provider
-            self.base_url = base_url or os.getenv("OPENAI_BASE_URL", "https://api.groq.com/openai/v1")
+            self.base_url = base_url or (os.getenv("OPENAI_BASE_URL") if "groq" in (os.getenv("OPENAI_BASE_URL") or "") else "https://api.groq.com/openai/v1")
             self.api_key = key
             self.model = model or os.getenv("LLM_MODEL", "qwen/qwen3.8-27b")
             provider = "groq"
         elif key and key.startswith("sk-"):
             # OpenAI provider
-            self.base_url = base_url or os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+            self.base_url = base_url or (os.getenv("OPENAI_BASE_URL") if "openai.com" in (os.getenv("OPENAI_BASE_URL") or "") else "https://api.openai.com/v1")
             self.api_key = key
-            self.model = model or os.getenv("LLM_MODEL", "gpt-4o-mini")
+            self.model = model or "gpt-4o-mini"
             provider = "openai"
         else:
             # Local Ollama / vLLM provider
