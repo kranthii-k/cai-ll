@@ -602,6 +602,9 @@
             <div class="badge badge-aec">
                 Echo Reference Tap Online (60ms Delay Alignment)
             </div>
+            <div class="badge badge-status" id="aiEngineBadge" style="cursor: pointer; border-color: rgba(20, 184, 166, 0.4); color: var(--teal);" onclick="openConfigModal()">
+                ⚡ AI: Built-in (&lt;20ms)
+            </div>
             <div class="badge badge-status" id="connectionBadge">
                 <span class="status-dot" id="statusDot"></span>
                 <span id="connectionText">Disconnected</span>
@@ -636,6 +639,18 @@
                     <!-- Real-Time Audio Waveform Visualizer -->
                     <div class="visualizer-container">
                         <canvas id="audioCanvas"></canvas>
+                    </div>
+
+                    <!-- Cloud LLM API Key Input (Groq / OpenAI) -->
+                    <div class="api-key-box" style="width: 100%; margin-top: 0.75rem; background: var(--bg-elevated); border: 1px solid var(--border-dim); border-radius: 8px; padding: 0.6rem 0.8rem; display: flex; flex-direction: column; gap: 0.4rem;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; font-size: 0.75rem;">
+                            <span style="font-weight: 600; color: #cbd5e1;">LLM Key (Groq / OpenAI)</span>
+                            <span id="providerBadge" style="font-family: var(--font-mono); font-size: 0.7rem; color: var(--teal);">Built-in (&lt;20ms)</span>
+                        </div>
+                        <div style="display: flex; gap: 0.4rem;">
+                            <input type="password" id="apiKeyInput" placeholder="Paste gsk_... or sk-..." style="flex: 1; background: #090d16; border: 1px solid var(--border-dim); border-radius: 6px; padding: 0.4rem 0.6rem; color: #fff; font-size: 0.75rem; font-family: var(--font-mono); outline: none;" />
+                            <button id="saveKeyBtn" style="background: var(--teal); border: none; border-radius: 6px; padding: 0.4rem 0.75rem; color: #000; font-weight: 700; font-size: 0.75rem; cursor: pointer;">Save</button>
+                        </div>
                     </div>
                 </div>
 
@@ -736,12 +751,21 @@
     <script>
         let ws = null;
         let audioContext = null;
+        let agentGainNode = null;
         let micStream = null;
         let scriptProcessor = null;
         let micAnalyser = null;
         let isConnected = false;
         let bargeInCount = 0;
         let scheduledAudioSources = [];
+
+        // Jitter Buffer & Continuous Audio Timeline State
+        let nextPlayTime = 0;
+        let jitterBuffer = [];
+        let jitterSamplesCount = 0;
+        let flushTimer = null;
+        const MIN_BUFFER_SAMPLES = 800; // ~50ms accumulator threshold to smooth micro-chunks
+        const INITIAL_BUFFER_DELAY_SEC = 0.08; // 80ms cushion against network/timer jitter
 
         const TARGET_SAMPLE_RATE = 16000;
 
@@ -848,6 +872,11 @@
                     await audioContext.resume();
                 }
 
+                // Create Master Agent Gain Node for click-free smooth transitions & barge-in cutoff
+                agentGainNode = audioContext.createGain();
+                agentGainNode.gain.setValueAtTime(1.0, audioContext.currentTime);
+                agentGainNode.connect(audioContext.destination);
+
                 const host = (window.location.host && window.location.host.trim() !== '') ? window.location.host : 'localhost:8000';
                 const protocol = (window.location.protocol === 'https:') ? 'wss:' : 'ws:';
                 const wsUrl = `${protocol}//${host}/web_stream`;
@@ -937,6 +966,14 @@
                 setTimeout(() => bargeinBanner.classList.remove('active'), 2500);
                 statusLabel.innerText = "⚡ Barge-in detected! Interrupted agent.";
             }
+            else if (msg.event === "tts_stop") {
+                // Agent finished speaking; flush any remaining tail buffer
+                if (flushTimer) {
+                    clearTimeout(flushTimer);
+                    flushTimer = null;
+                }
+                flushJitterBuffer();
+            }
             else if (msg.event === "classification") {
                 stanceIndicator.innerText = `Stance: ${msg.stance.toUpperCase()} (${msg.latency_ms.toFixed(1)}ms)`;
             }
@@ -946,32 +983,78 @@
             else if (msg.event === "transcript") {
                 appendTranscriptMessage(msg.role, msg.text, msg.is_filler, msg.stance);
             }
+            else if (msg.event === "config_updated") {
+                updateEngineBadge(msg);
+            }
             else if (msg.event === "metrics") {
                 updateWaterfallMetrics(msg);
             }
         }
 
-        // Play scheduled binary audio chunks
-        let nextPlayTime = 0;
+        // Jitter buffer queue & smooth audio scheduling
         function handleBinaryAudio(arrayBuffer) {
             if (!audioContext || audioContext.state === 'closed') return;
 
             const int16Array = new Int16Array(arrayBuffer);
+            if (int16Array.length === 0) return;
+
             const float32Array = new Float32Array(int16Array.length);
             for (let i = 0; i < int16Array.length; i++) {
                 float32Array[i] = int16Array[i] / 32768.0;
             }
 
-            const buffer = audioContext.createBuffer(1, float32Array.length, TARGET_SAMPLE_RATE);
-            buffer.copyToChannel(float32Array, 0);
+            jitterBuffer.push(float32Array);
+            jitterSamplesCount += float32Array.length;
+
+            // If accumulated buffer is >= MIN_BUFFER_SAMPLES (50ms) or chunk is 100ms, schedule immediately
+            if (jitterSamplesCount >= MIN_BUFFER_SAMPLES) {
+                if (flushTimer) {
+                    clearTimeout(flushTimer);
+                    flushTimer = null;
+                }
+                flushJitterBuffer();
+            } else if (!flushTimer) {
+                // Brief 20ms fallback timer to flush any leftover tail samples
+                flushTimer = setTimeout(() => {
+                    flushTimer = null;
+                    flushJitterBuffer();
+                }, 20);
+            }
+        }
+
+        function flushJitterBuffer() {
+            if (!audioContext || audioContext.state === 'closed' || jitterSamplesCount === 0) return;
+
+            let merged;
+            if (jitterBuffer.length === 1) {
+                merged = jitterBuffer[0];
+            } else {
+                merged = new Float32Array(jitterSamplesCount);
+                let offset = 0;
+                for (let i = 0; i < jitterBuffer.length; i++) {
+                    merged.set(jitterBuffer[i], offset);
+                    offset += jitterBuffer[i].length;
+                }
+            }
+            jitterBuffer = [];
+            jitterSamplesCount = 0;
+
+            if (merged.length === 0) return;
+
+            const buffer = audioContext.createBuffer(1, merged.length, TARGET_SAMPLE_RATE);
+            buffer.copyToChannel(merged, 0);
 
             const source = audioContext.createBufferSource();
             source.buffer = buffer;
-            source.connect(audioContext.destination);
+            source.connect(agentGainNode || audioContext.destination);
 
             const now = audioContext.currentTime;
+
+            // Continuous timeline scheduling:
+            // If nextPlayTime has fallen behind now (playback ran dry or is starting),
+            // schedule with an initial buffer cushion (80ms) so network/timer jitter never starves playback
             if (nextPlayTime < now) {
-                nextPlayTime = now + 0.02;
+                nextPlayTime = now + INITIAL_BUFFER_DELAY_SEC;
             }
 
             source.start(nextPlayTime);
@@ -985,10 +1068,41 @@
         }
 
         function stopAllScheduledAudio() {
+            if (flushTimer) {
+                clearTimeout(flushTimer);
+                flushTimer = null;
+            }
+            jitterBuffer = [];
+            jitterSamplesCount = 0;
+
+            const now = audioContext ? audioContext.currentTime : 0;
+
+            // Smooth 5ms ramp-down to eliminate sudden DC cutoff clicks/pops
+            if (agentGainNode && audioContext) {
+                try {
+                    agentGainNode.gain.cancelScheduledValues(now);
+                    agentGainNode.gain.setValueAtTime(agentGainNode.gain.value, now);
+                    agentGainNode.gain.linearRampToValueAtTime(0.0, now + 0.005);
+                    setTimeout(() => {
+                        if (agentGainNode && audioContext && isConnected) {
+                            agentGainNode.gain.cancelScheduledValues(audioContext.currentTime);
+                            agentGainNode.gain.setValueAtTime(1.0, audioContext.currentTime);
+                        }
+                    }, 12);
+                } catch (e) {}
+            }
+
+            // Stop all currently playing audio source nodes
             scheduledAudioSources.forEach(src => {
-                try { src.stop(); src.disconnect(); } catch (e) {}
+                try {
+                    src.stop(now + 0.005);
+                    setTimeout(() => {
+                        try { src.disconnect(); } catch (e) {}
+                    }, 12);
+                } catch (e) {}
             });
             scheduledAudioSources = [];
+
             if (audioContext) {
                 nextPlayTime = audioContext.currentTime;
             }
@@ -1041,6 +1155,10 @@
             isConnected = false;
             stopAllScheduledAudio();
 
+            if (agentGainNode) {
+                try { agentGainNode.disconnect(); } catch (e) {}
+                agentGainNode = null;
+            }
             if (scriptProcessor) {
                 scriptProcessor.disconnect();
                 scriptProcessor = null;
@@ -1095,6 +1213,162 @@
         promptInput.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') sendPrompt();
         });
+
+        // AI Engine Configuration Modal & Management
+        const configModal = document.getElementById('configModal');
+        const aiEngineBadge = document.getElementById('aiEngineBadge');
+        const modalApiKey = document.getElementById('modalApiKey');
+        const modalStatus = document.getElementById('modalStatus');
+        const modalActiveEngine = document.getElementById('modalActiveEngine');
+
+        function openConfigModal() {
+            if (configModal) configModal.style.display = 'flex';
+        }
+        function closeConfigModal() {
+            if (configModal) configModal.style.display = 'none';
+        }
+
+        async function refreshConfigStatus() {
+            try {
+                const res = await fetch('/api/config');
+                if (res.ok) {
+                    const data = await res.json();
+                    updateEngineBadge(data);
+                }
+            } catch (e) {}
+        }
+
+        function updateEngineBadge(data) {
+            if (inlineBadge) {
+                if (data.is_online && data.has_api_key) {
+                    const providerName = data.provider === 'groq' ? 'Groq LPU' : 'OpenAI';
+                    inlineBadge.innerText = `${providerName}`;
+                    inlineBadge.style.color = 'var(--blue)';
+                } else if (data.is_online) {
+                    inlineBadge.innerText = 'Ollama';
+                    inlineBadge.style.color = 'var(--purple)';
+                } else {
+                    inlineBadge.innerText = 'Built-in (<20ms)';
+                    inlineBadge.style.color = 'var(--teal)';
+                }
+            }
+            if (!aiEngineBadge) return;
+            if (data.is_online && data.has_api_key) {
+                const providerName = data.provider === 'groq' ? 'Groq LPU' : 'OpenAI';
+                aiEngineBadge.innerHTML = `☁️ AI: ${providerName}`;
+                aiEngineBadge.style.color = 'var(--blue)';
+                aiEngineBadge.style.borderColor = 'rgba(56, 189, 248, 0.4)';
+                if (modalActiveEngine) modalActiveEngine.innerText = `${providerName} (${data.model || ''})`;
+            } else if (data.is_online) {
+                aiEngineBadge.innerHTML = `🖥️ AI: Ollama`;
+                aiEngineBadge.style.color = 'var(--purple)';
+                aiEngineBadge.style.borderColor = 'rgba(168, 85, 247, 0.4)';
+                if (modalActiveEngine) modalActiveEngine.innerText = `Ollama (${data.model || ''})`;
+            } else {
+                aiEngineBadge.innerHTML = `⚡ AI: Built-in (&lt;20ms)`;
+                aiEngineBadge.style.color = 'var(--teal)';
+                aiEngineBadge.style.borderColor = 'rgba(20, 184, 166, 0.4)';
+                if (modalActiveEngine) modalActiveEngine.innerText = `Instant Built-in AI (<20ms)`;
+            }
+        }
+
+        async function saveCloudConfig() {
+            const key = modalApiKey.value.trim();
+            if (!key) {
+                modalStatus.innerText = "Please enter an API key!";
+                modalStatus.style.color = "var(--rose)";
+                return;
+            }
+            modalStatus.innerText = "Connecting...";
+            modalStatus.style.color = "var(--teal)";
+
+            try {
+                const res = await fetch('/api/config', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ api_key: key })
+                });
+                const data = await res.json();
+                if (data.status === 'success') {
+                    updateEngineBadge({ is_online: data.is_online, has_api_key: true, provider: data.provider, model: data.model });
+                    modalStatus.innerText = `Connected to ${data.provider.toUpperCase()} (${data.model})!`;
+                    modalStatus.style.color = "var(--green)";
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({ event: "config", api_key: key }));
+                    }
+                    setTimeout(closeConfigModal, 1200);
+                } else {
+                    modalStatus.innerText = "Error updating configuration.";
+                    modalStatus.style.color = "var(--rose)";
+                }
+            } catch (err) {
+                modalStatus.innerText = `Error: ${err.message}`;
+                modalStatus.style.color = "var(--rose)";
+            }
+        }
+
+        async function useBuiltinAI() {
+            modalStatus.innerText = "Resetting to Built-in AI...";
+            try {
+                await fetch('/api/config', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ api_key: "not-needed", base_url: "http://localhost:11434/v1" })
+                });
+                updateEngineBadge({ is_online: false, has_api_key: false });
+                modalApiKey.value = "";
+                modalStatus.innerText = "Switched to Instant Built-in AI (<20ms)!";
+                modalStatus.style.color = "var(--teal)";
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ event: "config", api_key: "not-needed" }));
+                }
+                setTimeout(closeConfigModal, 1000);
+            } catch (e) {}
+        }
+
+        // Wire inline API key box
+        const inlineKeyInput = document.getElementById('apiKeyInput');
+        const inlineSaveBtn = document.getElementById('saveKeyBtn');
+        const inlineBadge = document.getElementById('providerBadge');
+
+        if (inlineSaveBtn && inlineKeyInput) {
+            inlineSaveBtn.addEventListener('click', () => {
+                if (modalApiKey) modalApiKey.value = inlineKeyInput.value;
+                saveCloudConfig();
+            });
+            inlineKeyInput.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') {
+                    if (modalApiKey) modalApiKey.value = inlineKeyInput.value;
+                    saveCloudConfig();
+                }
+            });
+        }
+
+        // Check active AI config on load
+        refreshConfigStatus();
     </script>
+
+    <!-- AI Brain Configuration Modal -->
+    <div id="configModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.7); z-index:9999; align-items:center; justify-content:center; backdrop-filter:blur(6px);">
+        <div style="background:var(--bg-surface); border:1px solid var(--border-highlight); border-radius:14px; width:440px; max-width:92vw; padding:1.5rem; box-shadow:0 20px 40px rgba(0,0,0,0.8);">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
+                <h3 style="font-size:1.1rem; color:#fff; display:flex; align-items:center; gap:0.5rem;">🤖 AI Brain Configuration</h3>
+                <button onclick="closeConfigModal()" style="background:none; border:none; color:var(--text-muted); font-size:1.4rem; cursor:pointer;">&times;</button>
+            </div>
+            <p style="font-size:0.85rem; color:var(--text-muted); margin-bottom:1rem; line-height:1.4;">
+                Active Engine: <strong id="modalActiveEngine" style="color:var(--teal);">Instant Built-in AI (&lt;20ms)</strong>.<br />
+                The system answers without delay. You can also connect <strong>Groq LPU</strong> (<span style="font-family:var(--font-mono);">gsk_...</span>) or <strong>OpenAI</strong> (<span style="font-family:var(--font-mono);">sk-...</span>):
+            </p>
+            <div style="margin-bottom:1rem;">
+                <label style="display:block; font-size:0.75rem; color:var(--text-muted); margin-bottom:0.35rem; font-family:var(--font-mono);">API KEY (Groq or OpenAI)</label>
+                <input type="password" id="modalApiKey" placeholder="Paste gsk_... or sk-..." style="width:100%; padding:0.65rem 0.8rem; background:var(--bg-base); border:1px solid var(--border-dim); border-radius:8px; color:#fff; font-family:var(--font-mono); font-size:0.85rem;" />
+            </div>
+            <div style="display:flex; gap:0.75rem; justify-content:flex-end;">
+                <button onclick="useBuiltinAI()" style="padding:0.6rem 1rem; border-radius:8px; background:var(--bg-elevated); border:1px solid var(--border-dim); color:var(--text-muted); cursor:pointer; font-size:0.85rem;">Use Built-in (&lt;20ms)</button>
+                <button onclick="saveCloudConfig()" style="padding:0.6rem 1.2rem; border-radius:8px; background:linear-gradient(135deg, var(--teal), var(--blue)); border:none; color:#fff; font-weight:600; cursor:pointer; font-size:0.85rem;">Connect Cloud</button>
+            </div>
+            <div id="modalStatus" style="margin-top:0.75rem; font-size:0.8rem; color:var(--teal); text-align:center;"></div>
+        </div>
+    </div>
 </body>
 </html>
