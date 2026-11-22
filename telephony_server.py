@@ -618,7 +618,8 @@ class CallSession:
             try:
                 frame_16k = await self.crossfade_buffer.read_frame_async(frame_samples, timeout=0.05)
                 if len(frame_16k) == 0:
-                    if self.tts_playing and not self.crossfade_buffer.has_data():
+                    is_generating = bool(self.current_tts_task and not self.current_tts_task.done())
+                    if self.tts_playing and not self.crossfade_buffer.has_data() and not is_generating:
                         self.tts_playing = False
                         if self.mode == "web":
                             await self.send_json_safe({"event": "tts_stop"})
