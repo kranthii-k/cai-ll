@@ -807,42 +807,65 @@
         }
         drawVisualizer();
 
+        // Helper: Downsample captured mic audio to 16kHz
+        function downsampleTo16k(inputData, fromRate) {
+            if (fromRate === TARGET_SAMPLE_RATE) return inputData;
+            const ratio = fromRate / TARGET_SAMPLE_RATE;
+            const newLength = Math.round(inputData.length / ratio);
+            const result = new Float32Array(newLength);
+            for (let i = 0; i < newLength; i++) {
+                const origIndex = i * ratio;
+                const indexFloor = Math.floor(origIndex);
+                const indexCeil = Math.min(inputData.length - 1, Math.ceil(origIndex));
+                const frac = origIndex - indexFloor;
+                result[i] = inputData[indexFloor] * (1 - frac) + inputData[indexCeil] * frac;
+            }
+            return result;
+        }
+
         // Start Call
         async function startCall() {
             try {
                 statusLabel.innerText = "Requesting microphone permissions...";
-                micStream = await navigator.mediaDevices.getUserMedia({
-                    audio: {
-                        echoCancellation: false, // Let server Echo Reference Tap handle acoustic echo!
-                        noiseSuppression: false,
-                        autoGainControl: false,
-                        channelCount: 1,
-                        sampleRate: TARGET_SAMPLE_RATE
-                    },
-                    video: false
-                });
+                
+                try {
+                    micStream = await navigator.mediaDevices.getUserMedia({
+                        audio: {
+                            echoCancellation: false,
+                            noiseSuppression: false,
+                            autoGainControl: true,
+                            channelCount: 1
+                        },
+                        video: false
+                    });
+                } catch (e) {
+                    // Fallback to simple audio constraint if specific parameters unsupported
+                    micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+                }
 
-                audioContext = new (window.AudioContext || window.webkitAudioContext)({
-                    sampleRate: TARGET_SAMPLE_RATE
-                });
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                if (audioContext.state === 'suspended') {
+                    await audioContext.resume();
+                }
 
-                const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-                const wsUrl = `${protocol}//${window.location.host}/web_stream`;
+                const host = (window.location.host && window.location.host.trim() !== '') ? window.location.host : 'localhost:8000';
+                const protocol = (window.location.protocol === 'https:') ? 'wss:' : 'ws:';
+                const wsUrl = `${protocol}//${host}/web_stream`;
 
-                statusLabel.innerText = "Connecting full-duplex WebSocket...";
+                statusLabel.innerText = `Connecting to ${wsUrl}...`;
                 ws = new WebSocket(wsUrl);
                 ws.binaryType = "arraybuffer";
 
                 ws.onopen = () => {
                     isConnected = true;
-                    statusLabel.innerText = "Call connected! Full-duplex active.";
+                    statusLabel.innerText = "Call connected! Full-duplex active. Start speaking...";
                     callBtnText.innerText = "END";
                     callBtnSub.innerText = "HANG UP";
                     callBtn.classList.add('active');
 
                     connectionBadge.classList.add('connected');
                     statusDot.classList.add('pulse');
-                    connectionText.innerText = "Connected (16kHz)";
+                    connectionText.innerText = `Connected (${TARGET_SAMPLE_RATE / 1000}kHz)`;
 
                     // Setup Mic capture
                     const source = audioContext.createMediaStreamSource(micStream);
@@ -850,16 +873,24 @@
                     micAnalyser.fftSize = 128;
                     source.connect(micAnalyser);
 
-                    scriptProcessor = audioContext.createScriptProcessor(2048, 1, 1);
+                    const bufferSize = 2048;
+                    scriptProcessor = audioContext.createScriptProcessor(bufferSize, 1, 1);
                     source.connect(scriptProcessor);
-                    scriptProcessor.connect(audioContext.destination);
+                    
+                    // Route to zero-gain node so user mic is not routed to speakers (prevents feedback)
+                    const muteNode = audioContext.createGain();
+                    muteNode.gain.value = 0;
+                    scriptProcessor.connect(muteNode);
+                    muteNode.connect(audioContext.destination);
 
+                    const nativeRate = audioContext.sampleRate;
                     scriptProcessor.onaudioprocess = (e) => {
                         if (ws && ws.readyState === WebSocket.OPEN) {
                             const float32Data = e.inputBuffer.getChannelData(0);
-                            const int16Data = new Int16Array(float32Data.length);
-                            for (let i = 0; i < float32Data.length; i++) {
-                                int16Data[i] = Math.max(-32768, Math.min(32767, float32Data[i] * 32767));
+                            const resampled16k = downsampleTo16k(float32Data, nativeRate);
+                            const int16Data = new Int16Array(resampled16k.length);
+                            for (let i = 0; i < resampled16k.length; i++) {
+                                int16Data[i] = Math.max(-32768, Math.min(32767, resampled16k[i] * 32767));
                             }
                             ws.send(int16Data.buffer);
                         }
@@ -876,15 +907,22 @@
                     handleBinaryAudio(event.data);
                 };
 
-                ws.onclose = () => { endCall(); };
+                ws.onclose = (event) => {
+                    console.log("WebSocket closed", event);
+                    endCall();
+                    if (!isConnected) {
+                        statusLabel.innerText = `Connection closed. (Code: ${event.code || 1000})`;
+                    }
+                };
                 ws.onerror = (err) => {
                     console.error("WebSocket error:", err);
+                    statusLabel.innerText = `Server error connecting to ws://${host}/web_stream. Is the server running?`;
                     endCall();
                 };
 
             } catch (err) {
                 console.error("Mic access error:", err);
-                statusLabel.innerText = "Microphone access denied or error.";
+                statusLabel.innerText = `Microphone Error: ${err.name || 'Error'} - ${err.message || 'Permission denied'}`;
             }
         }
 
