@@ -136,26 +136,28 @@ class FillerManager:
     # Canonical conversational stance phrases:
     DEFAULT_FILLERS: Dict[str, List[str]] = {
         "affirmative": [
-            "Yeah, absolutely...",
-            "Gotcha, right...",
             "Sure thing...",
+            "Gotcha, right...",
+            "Yeah, absolutely...",
         ],
         "analytical": [
-            "Let's see here...",
-            "Checking that right now...",
-            "Let me pull that up...",
+            "Let's see...",
+            "Checking on that...",
+            "Looking into that...",
         ],
         "empathetic": [
-            "Oh, I understand...",
-            "I hear you, let me take care of that...",
+            "I understand...",
+            "I hear you...",
+            "Got it, no problem...",
         ],
         "clarifying": [
-            "Hmm, let's see...",
+            "Sure thing...",
             "Right, so...",
+            "Gotcha...",
         ],
         "direct": [
+            "Sure!",
             "Hey there!",
-            "Hi, I'm here!",
             "Hello, sure thing...",
         ],
     }

@@ -1014,7 +1014,29 @@
                     scriptProcessor.onaudioprocess = (e) => {
                         if (ws && ws.readyState === WebSocket.OPEN) {
                             const float32Data = e.inputBuffer.getChannelData(0);
-                            const resampled16k = micResampler.resample(float32Data);
+                            const now = audioContext ? audioContext.currentTime : 0;
+                            const isAgentPlaying = scheduledAudioSources.length > 0 && nextPlayTime >= (now + 0.005);
+
+                            // Calculate instantaneous microphone RMS
+                            let sumSquares = 0;
+                            for (let i = 0; i < float32Data.length; i++) {
+                                sumSquares += float32Data[i] * float32Data[i];
+                            }
+                            const micRms = Math.sqrt(sumSquares / float32Data.length);
+
+                            // Client-side acoustic echo ducking:
+                            // If agent is playing through laptop speakers and mic level is low (< 0.075),
+                            // it's speakerphone leakage. Duck it by 95% to protect the server pipeline.
+                            // If user speaks up loudly (micRms >= 0.075), let it pass at full volume for instant barge-in!
+                            let processedData = float32Data;
+                            if (isAgentPlaying && micRms < 0.075) {
+                                processedData = new Float32Array(float32Data.length);
+                                for (let i = 0; i < float32Data.length; i++) {
+                                    processedData[i] = float32Data[i] * 0.05;
+                                }
+                            }
+
+                            const resampled16k = micResampler.resample(processedData);
                             if (resampled16k.length > 0) {
                                 const int16Data = new Int16Array(resampled16k.length);
                                 for (let i = 0; i < resampled16k.length; i++) {
@@ -1085,7 +1107,12 @@
                 }
             }
             else if (msg.event === "transcript") {
-                appendTranscriptMessage(msg.role, msg.text, msg.is_filler, msg.stance);
+                if (msg.is_filler) {
+                    stanceIndicator.innerText = `⚡ ${msg.text}`;
+                    statusLabel.innerText = `⚡ Agent: ${msg.text}`;
+                } else {
+                    appendTranscriptMessage(msg.role, msg.text, false, msg.stance);
+                }
             }
             else if (msg.event === "config_updated") {
                 updateEngineBadge(msg);
