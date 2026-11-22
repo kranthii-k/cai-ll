@@ -52,6 +52,12 @@ if os.name == 'nt':
     except Exception:
         pass
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 import torch
 from faster_whisper import WhisperModel
 from kokoro_onnx import Kokoro

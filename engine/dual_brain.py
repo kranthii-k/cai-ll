@@ -29,6 +29,12 @@ from typing import (
 )
 from urllib.parse import urlparse
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 import httpx
 from openai import AsyncOpenAI
 try:
@@ -461,13 +467,13 @@ class DualBrainEngine:
         env_groq = os.getenv("GROQ_API_KEY")
         env_openai = os.getenv("OPENAI_API_KEY")
 
-        key = api_key or env_groq or env_openai or self.api_key if hasattr(self, "api_key") else None
+        key = api_key or env_groq or env_openai or getattr(self, "api_key", None)
 
         if key and key.startswith("gsk_"):
             # Groq LPU provider
             self.base_url = base_url or os.getenv("OPENAI_BASE_URL", "https://api.groq.com/openai/v1")
             self.api_key = key
-            self.model = model or os.getenv("LLM_MODEL", "llama-3.3-70b-versatile")
+            self.model = model or os.getenv("LLM_MODEL", "qwen/qwen3.8-27b")
             provider = "groq"
         elif key and key.startswith("sk-"):
             # OpenAI provider
