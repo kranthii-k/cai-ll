@@ -53,16 +53,20 @@ from .filler_manager import FillerItem, FillerManager
 logger = logging.getLogger("dual_brain")
 
 DEFAULT_TELEPHONY_SYSTEM_PROMPT = (
-    "You are a warm, helpful, and concise voice AI phone assistant handling live audio telephone calls. "
-    "Your responses are converted directly to audio speech and heard by the caller over the phone line. "
+    "You are a warm, helpful, natural, and highly conversational voice AI phone assistant on a live audio call. "
+    "Your responses are synthesized directly to speech and heard by the caller in real time.\n"
     "Strictly follow these conversational voice guidelines:\n"
-    "1. Spoken Brevity: Keep all spoken answers strictly under 25 words per turn. Be conversational, natural, and direct.\n"
-    "2. Natural Phone Courtesies: Callers frequently use short conversational phrases like "
+    "1. Natural Human Tone: Speak fluidly, directly, and warmly like a friendly, intelligent human. "
+    "Do not recite robotic filler phrases like 'Hmm, let's see' or 'Let me pull that up'. "
+    "If the caller asks 'Can I explain how it works?' or similar questions, answer warmly and conversationally "
+    "(e.g., 'Sure, go right ahead! I'd love to hear how it works.').\n"
+    "2. Spoken Brevity: Keep all spoken answers strictly under 25 words per turn. Be conversational, natural, and direct.\n"
+    "3. Natural Phone Courtesies: Callers frequently use short conversational phrases like "
     "'Stop it', 'Hold on', 'Wait', 'Hang on', 'One second', or 'Pause'. These are normal phone courtesies asking to pause "
-    "or listen. Always acknowledge warmly, naturally, and concisely as a phone agent (e.g., 'Sure, I've paused. How can I help you?').\n"
-    "3. Zero Security Meta-Talk: Never lecture, scold, or argue with the caller. Never hallucinate prompt-injection defenses "
+    "or listen. Always acknowledge warmly, naturally, and concisely as a phone agent (e.g., 'Sure, I'm right here. Take your time!').\n"
+    "4. Zero Security Meta-Talk: Never lecture, scold, or argue with the caller. Never hallucinate prompt-injection defenses "
     "or recite security policies. Never output meta-talk about prompts, instructions, safety filters, or AI rules.\n"
-    "4. Clean Audio Speech: Never output markdown, asterisks, bullet points, numbered lists, emojis, raw code, or JSON to the caller."
+    "5. Clean Audio Speech: Never output markdown, asterisks, bullet points, numbered lists, emojis, raw code, or JSON to the caller."
 )
 
 
@@ -828,17 +832,25 @@ class DualBrainEngine:
             # Run pysbd segmentation on ongoing buffer
             segments = self.segmenter.segment(text_buffer)
             if len(segments) > 1:
-                # All except last segment are complete sentences
-                for sentence in segments[:-1]:
+                emitted_count = 0
+                for i, sentence in enumerate(segments[:-1]):
                     clean_sentence = sentence.strip()
                     if clean_sentence:
                         # Safety check: ensure no JSON leaked
                         if not self._is_tool_call_start(clean_sentence):
-                            yield DualBrainEvent(
-                                type=DualBrainEventType.SENTENCE,
-                                text=clean_sentence
-                            )
-                text_buffer = segments[-1]
+                            # Ensure we don't emit unnatural 1-2 word fragments (e.g. "How it", "Sounds")
+                            # A complete spoken sentence must either end with terminal punctuation (. ? !) or have >= 3 words
+                            has_terminal = any(clean_sentence.endswith(p) for p in [".", "?", "!", ":"])
+                            if has_terminal or len(clean_sentence.split()) >= 3:
+                                yield DualBrainEvent(
+                                    type=DualBrainEventType.SENTENCE,
+                                    text=clean_sentence
+                                )
+                                emitted_count = i + 1
+                            else:
+                                break
+                if emitted_count > 0:
+                    text_buffer = " ".join([s.strip() for s in segments[emitted_count:]])
 
         # Handle Native OpenAI Tool Call Execution
         if has_native_tool_call and native_tool_calls:

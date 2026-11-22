@@ -1013,6 +1013,14 @@ class CallSession:
         if should_interrupt and self.tts_playing and barge_in_holdoff_ms >= 450.0:
             await self.handle_barge_in()
 
+        # VAD Echo Gate:
+        # If the bot is actively playing outbound speech and caller has NOT barged in,
+        # the inbound microphone audio is residual speakerphone echo!
+        # Attenuate it down to near-zero so Silero VAD doesn't detect the bot's own voice,
+        # transcribe it via Whisper, and cut off the bot's active turn mid-sentence!
+        if self.tts_playing and not should_interrupt:
+            cleaned_pcm = cleaned_pcm * 0.005
+
         # Non-blocking enqueue for VAD processing (preserves caller voice without dropping)
         await self.inbound_audio_queue.put(cleaned_pcm)
 

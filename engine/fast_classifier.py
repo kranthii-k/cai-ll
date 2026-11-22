@@ -250,6 +250,12 @@ class FastClassifier:
         analytical_matches = [m.group(0) for m in self._analytical_regex.finditer(clean_text)]
         affirmative_matches = [m.group(0) for m in self._affirmative_regex.finditer(clean_text)]
 
+        # If caller is asking permission to explain ("Can I explain", "Let me explain"),
+        # this is an affirmative conversational turn ("Sure, go ahead!"), not a clarifying question.
+        if re.search(r"\b(can\s+i|may\s+i|let\s+me|should\s+i)\s+explain\b", clean_text, re.I):
+            clarifying_matches = [m for m in clarifying_matches if "explain" not in m.lower()]
+            affirmative_matches.append("can_i_explain")
+
         # Scoring & Precedence Logic
         # Empathetic signals take top priority for customer sentiment & de-escalation
         if empathetic_matches:
